@@ -3,84 +3,653 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Day Care Safety: Protect Our Kids with Bollards</title>
-    <link rel="stylesheet" href="style.css">
+    <title>SafeGuard Kids - Daycare Safety Bollards & Barriers</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #2E8B57;
+            --secondary-color: #FF6B6B;
+            --accent-color: #4ECDC4;
+            --text-dark: #2C3E50;
+            --bg-light: #F8F9FA;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            line-height: 1.6;
+            color: var(--text-dark);
+        }
+
+        .hero-section {
+            background: linear-gradient(135deg, var(--primary-color), var(--accent-color));
+            color: white;
+            padding: 100px 0;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="20" cy="20" r="2" fill="rgba(255,255,255,0.1)"/><circle cx="80" cy="80" r="2" fill="rgba(255,255,255,0.1)"/><circle cx="60" cy="30" r="1.5" fill="rgba(255,255,255,0.1)"/></svg>');
+            animation: float 20s linear infinite;
+        }
+
+        @keyframes float {
+            0% { transform: translateY(0px); }
+            50% { transform: translateY(-20px); }
+            100% { transform: translateY(0px); }
+        }
+
+        .navbar {
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            background: white !important;
+        }
+
+        .navbar-brand {
+            font-weight: bold;
+            color: var(--primary-color) !important;
+            font-size: 1.5rem;
+        }
+
+        .nav-link {
+            font-weight: 500;
+            color: var(--text-dark) !important;
+            transition: color 0.3s ease;
+        }
+
+        .nav-link:hover {
+            color: var(--primary-color) !important;
+        }
+
+        .section-padding {
+            padding: 80px 0;
+        }
+
+        .section-title {
+            color: var(--primary-color);
+            font-weight: bold;
+            margin-bottom: 3rem;
+            position: relative;
+        }
+
+        .section-title::after {
+            content: '';
+            position: absolute;
+            bottom: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 60px;
+            height: 3px;
+            background: var(--secondary-color);
+        }
+
+        .card {
+            border: none;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            height: 100%;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            border-color: var(--primary-color);
+            font-weight: 500;
+            padding: 12px 30px;
+            border-radius: 25px;
+        }
+
+        .btn-primary:hover {
+            background: #246445;
+            border-color: #246445;
+            transform: translateY(-2px);
+        }
+
+        .feature-icon {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(135deg, var(--accent-color), var(--primary-color));
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1rem;
+            color: white;
+            font-size: 2rem;
+        }
+
+        .stats-section {
+            background: var(--bg-light);
+        }
+
+        .stat-number {
+            font-size: 3rem;
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+
+        .bollard-comparison {
+            background: white;
+            border-radius: 10px;
+            padding: 2rem;
+            margin: 1rem 0;
+        }
+
+        .comparison-header {
+            background: var(--primary-color);
+            color: white;
+            padding: 1rem;
+            border-radius: 10px 10px 0 0;
+            margin: -2rem -2rem 2rem -2rem;
+        }
+
+        .price-badge {
+            background: var(--secondary-color);
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+        }
+
+        .footer {
+            background: var(--text-dark);
+            color: white;
+            padding: 50px 0 20px;
+        }
+
+        .footer h5 {
+            color: var(--accent-color);
+        }
+
+        .safety-tip {
+            background: linear-gradient(135deg, #FFF3CD, #F8D7DA);
+            border-left: 5px solid var(--secondary-color);
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 0 10px 10px 0;
+        }
+
+        .testimonial {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            position: relative;
+        }
+
+        .testimonial::before {
+            content: '"';
+            font-size: 4rem;
+            color: var(--accent-color);
+            position: absolute;
+            top: -10px;
+            left: 20px;
+            opacity: 0.3;
+        }
+
+        @media (max-width: 768px) {
+            .hero-section {
+                padding: 60px 0;
+            }
+            
+            .section-padding {
+                padding: 50px 0;
+            }
+        }
+    </style>
 </head>
 <body>
-    <header>
-        <nav>
-            <div class="logo">ChildSafe Solutions</div>
-            <ul>
-                <li><a href="index.html">Home</a></li>
-                <li><a href="about.html">About Us</a></li>
-                <li><a href="why-bollards.html">Why Bollards?</a></li>
-                <li><a href="options.html">Our Solutions</a></li>
-                <li><a href="contact.html">Contact</a></li>
-            </ul>
-        </nav>
-    </header>
-
-    <main>
-        <section class="hero">
-            <div class="hero-content">
-                <h1>Protecting1 the Future of Our Community</h1>
-                <p>Ensuring the safest possible environment for children in day care facilities with professional-grade protective barriers.</p>
-                <a href="why-bollards.html" class="cta-button">Learn How We Can Help</a>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-light bg-light fixed-top">
+        <div class="container">
+            <a class="navbar-brand" href="#home">
+                <i class="fas fa-shield-alt me-2"></i>SafeGuard Kids
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item"><a class="nav-link" href="#home">Home</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#safety">Why Safety Matters</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#bollards">Bollard Solutions</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#products">Products</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#installation">Installation</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#contact">Contact</a></li>
+                </ul>
             </div>
-        </section>
+        </div>
+    </nav>
 
-        <section class="introduction">
-            <h2>The Unseen Dangers: Vehicle-into-Building Incidents</h2>
-            <p>While we focus on what happens inside, a significant and often preventable risk looms just outside. The tragic **Richmond Hill daycare crash** is a stark reminder of how vulnerable our children are to vehicle-into-building incidents.</p>
-        </section>
-
-        <section class="statistics">
-            <div class="stat-item">
-                <h3>Over 100 crashes a day</h3>
-                <p>According to safety experts, vehicles crash into buildings in North America over **100 times every single day**, resulting in thousands of injuries and fatalities each year. These are not rare occurrences.</p>
-            </div>
-            <div class="stat-item">
-                <h3>Children are at high risk</h3>
-                <p>A significant percentage of these incidents happen at storefronts, offices, and, most alarmingly, at **schools and daycares**. The lives of our most vulnerable are put at risk during common activities like drop-off and pick-up.</p>
-            </div>
-            <div class="stat-item">
-                <h3>Lives are on the line</h3>
-                <p>Every year, hundreds of children are tragically killed or injured in vehicle-related incidents in Canada and the U.S. These are not just statistics; these are children whose futures are cut short by preventable accidents.</p>
-            </div>
-        </section>
-
-        <section class="key-benefits">
-            <h2>How Bollards Enhance Safety</h2>
-            <div class="benefit-grid">
-                <div class="benefit-item">
-                    <img src="images/icon-safety.svg" alt="Safety Icon">
-                    <h3>Vehicle Impact Protection</h3>
-                    <p>Fixed bollards create a physical barrier to stop or slow down out-of-control vehicles, preventing them from entering the building or playground area.</p>
+    <!-- Hero Section -->
+    <section id="home" class="hero-section">
+        <div class="container">
+            <div class="row align-items-center">
+                <div class="col-lg-6">
+                    <h1 class="display-4 mb-4">Protecting Our Most Precious Assets</h1>
+                    <p class="lead mb-4">Professional bollard and barrier solutions designed specifically for daycare centers, preschools, and childcare facilities. Keep children safe from vehicle threats with our proven safety systems.</p>
+                    <div class="d-flex gap-3">
+                        <a href="#products" class="btn btn-primary btn-lg">View Solutions</a>
+                        <a href="#contact" class="btn btn-outline-light btn-lg">Get Quote</a>
+                    </div>
                 </div>
-                <div class="benefit-item">
-                    <img src="images/icon-deterrent.svg" alt="Deterrent Icon">
-                    <h3>Visual Deterrent</h3>
-                    <p>Their visible presence acts as a strong psychological deterrent, guiding drivers and ensuring they maintain a safe distance from pedestrian-heavy zones.</p>
-                </div>
-                <div class="benefit-item">
-                    <img src="images/icon-control.svg" alt="Control Icon">
-                    <h3>Traffic & Pedestrian Control</h3>
-                    <p>They define safe pedestrian pathways, separate parking areas from play zones, and ensure a clear, controlled flow of traffic during drop-off and pick-up times.</p>
+                <div class="col-lg-6">
+                    <div class="text-center">
+                        <div style="font-size: 10rem; color: rgba(255,255,255,0.2);">
+                            <i class="fas fa-child"></i>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </section>
+        </div>
+    </section>
 
-        <section class="call-to-action">
-            <h2>Ready to Enhance Your Day Care's Safety?</h2>
-            <p>Get a free, no-obligation consultation to understand the best bollard solutions for your unique location.</p>
-            <a href="contact.html" class="cta-button">Contact Us Today</a>
-        </section>
-    </main>
+    <!-- Statistics Section -->
+    <section class="stats-section section-padding">
+        <div class="container">
+            <div class="row text-center">
+                <div class="col-md-3">
+                    <div class="stat-number">2,600+</div>
+                    <p>Vehicle-into-building crashes annually in the US</p>
+                </div>
+                <div class="col-md-3">
+                    <div class="stat-number">20%</div>
+                    <p>Of crashes occur at schools and daycares</p>
+                </div>
+                <div class="col-md-3">
+                    <div class="stat-number">500+</div>
+                    <p>Children injured each year</p>
+                </div>
+                <div class="col-md-3">
+                    <div class="stat-number">99%</div>
+                    <p>Prevention rate with proper bollards</p>
+                </div>
+            </div>
+        </div>
+    </section>
 
-    <footer>
-        <p>&copy; 2025 ChildSafe Solutions. All Rights Reserved.</p>
-    </footer>
+    <!-- Why Safety Matters -->
+    <section id="safety" class="section-padding">
+        <div class="container">
+            <h2 class="section-title text-center">Why Daycare Safety Bollards Are Essential</h2>
+            <div class="row">
+                <div class="col-lg-8">
+                    <h3 class="mb-4">The Growing Threat</h3>
+                    <p>Every year, thousands of vehicles accidentally crash into buildings across the United States. Daycare centers and preschools are particularly vulnerable due to:</p>
+                    
+                    <div class="row mt-4">
+                        <div class="col-md-6">
+                            <div class="card mb-4">
+                                <div class="card-body">
+                                    <div class="feature-icon">
+                                        <i class="fas fa-car-crash"></i>
+                                    </div>
+                                    <h5>High Traffic Areas</h5>
+                                    <p>Drop-off and pick-up zones create busy, congested areas where accidents are more likely to occur.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card mb-4">
+                                <div class="card-body">
+                                    <div class="feature-icon">
+                                        <i class="fas fa-users"></i>
+                                    </div>
+                                    <h5>Vulnerable Population</h5>
+                                    <p>Young children cannot react quickly to dangerous situations and rely on adults for protection.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card mb-4">
+                                <div class="card-body">
+                                    <div class="feature-icon">
+                                        <i class="fas fa-clock"></i>
+                                    </div>
+                                    <h5>Peak Times</h5>
+                                    <p>Rush hour drop-offs and pick-ups increase the risk of distracted or hurried drivers making mistakes.</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card mb-4">
+                                <div class="card-body">
+                                    <div class="feature-icon">
+                                        <i class="fas fa-building"></i>
+                                    </div>
+                                    <h5>Building Proximity</h5>
+                                    <p>Many daycare facilities are located close to parking areas and streets, increasing exposure risk.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="safety-tip">
+                        <h5><i class="fas fa-exclamation-triangle me-2"></i>Safety Fact</h5>
+                        <p><strong>Vehicle-into-building crashes happen every 2.5 hours</strong> in the United States, with an average of 60 people killed and 2,600 injured annually.</p>
+                    </div>
+                    
+                    <div class="testimonial mt-4">
+                        <p><em>"Installing bollards was the best decision we made. Parents feel safer dropping off their children, and we have peace of mind knowing our facility is protected."</em></p>
+                        <div class="mt-3">
+                            <strong>Sarah Johnson</strong><br>
+                            <small class="text-muted">Director, Sunshine Daycare Center</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
 
-    <script src="script.js"></script>
-</body>
-</html>
+    <!-- Bollard Solutions -->
+    <section id="bollards" class="section-padding bg-light">
+        <div class="container">
+            <h2 class="section-title text-center">How Bollards Protect Your Daycare</h2>
+            
+            <div class="row">
+                <div class="col-lg-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <div class="feature-icon">
+                                <i class="fas fa-shield-alt"></i>
+                            </div>
+                            <h5>Physical Barrier</h5>
+                            <p>Creates an impenetrable barrier between vehicles and your building, stopping cars before they can cause damage or injury.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <div class="feature-icon">
+                                <i class="fas fa-eye"></i>
+                            </div>
+                            <h5>Visual Deterrent</h5>
+                            <p>Highly visible bollards alert drivers to potential hazards and encourage more careful driving in sensitive areas.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <div class="feature-icon">
+                                <i class="fas fa-map-marked-alt"></i>
+                            </div>
+                            <h5>Traffic Control</h5>
+                            <p>Guides traffic flow and creates designated safe zones for children and pedestrians around your facility.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row mt-5">
+                <div class="col-lg-6">
+                    <h3>Protection Scenarios</h3>
+                    <ul class="list-unstyled">
+                        <li class="mb-3"><i class="fas fa-check-circle text-success me-2"></i> <strong>Accidental Acceleration:</strong> Driver mistakes gas for brake pedal</li>
+                        <li class="mb-3"><i class="fas fa-check-circle text-success me-2"></i> <strong>Medical Emergency:</strong> Driver loses consciousness or control</li>
+                        <li class="mb-3"><i class="fas fa-check-circle text-success me-2"></i> <strong>Weather Conditions:</strong> Slippery surfaces cause loss of control</li>
+                        <li class="mb-3"><i class="fas fa-check-circle text-success me-2"></i> <strong>Mechanical Failure:</strong> Brake failure or stuck accelerator</li>
+                        <li class="mb-3"><i class="fas fa-check-circle text-success me-2"></i> <strong>Distracted Driving:</strong> Phone use or other distractions</li>
+                    </ul>
+                </div>
+                <div class="col-lg-6">
+                    <h3>Benefits for Your Facility</h3>
+                    <ul class="list-unstyled">
+                        <li class="mb-3"><i class="fas fa-star text-warning me-2"></i> <strong>Peace of Mind:</strong> Staff and parents feel safer</li>
+                        <li class="mb-3"><i class="fas fa-star text-warning me-2"></i> <strong>Insurance Benefits:</strong> May reduce liability premiums</li>
+                        <li class="mb-3"><i class="fas fa-star text-warning me-2"></i> <strong>Professional Image:</strong> Shows commitment to safety</li>
+                        <li class="mb-3"><i class="fas fa-star text-warning me-2"></i> <strong>Compliance:</strong> Meets safety regulations and standards</li>
+                        <li class="mb-3"><i class="fas fa-star text-warning me-2"></i> <strong>Long-term Investment:</strong> Durable protection for years</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Products Section -->
+    <section id="products" class="section-padding">
+        <div class="container">
+            <h2 class="section-title text-center">Fixed Bollard Solutions</h2>
+            <p class="text-center mb-5">Choose from our range of professional-grade fixed bollards designed specifically for childcare facilities.</p>
+            
+            <div class="row">
+                <!-- Standard Steel Bollards -->
+                <div class="col-lg-4 mb-4">
+                    <div class="bollard-comparison">
+                        <div class="comparison-header">
+                            <h4 class="mb-0">Standard Steel Bollards</h4>
+                            <div class="price-badge mt-2">$150 - $250 each</div>
+                        </div>
+                        <div class="text-center mb-4">
+                            <div style="font-size: 4rem; color: var(--primary-color);">
+                                <i class="fas fa-circle"></i>
+                            </div>
+                        </div>
+                        
+                        <h5>Specifications:</h5>
+                        <ul>
+                            <li>4-6 inch diameter</li>
+                            <li>36-48 inch height</li>
+                            <li>Hot-dip galvanized steel</li>
+                            <li>Concrete foundation required</li>
+                            <li>Yellow or custom colors</li>
+                        </ul>
+                        
+                        <h5>Best For:</h5>
+                        <ul>
+                            <li>Budget-conscious facilities</li>
+                            <li>Light to medium traffic areas</li>
+                            <li>Standard protection needs</li>
+                        </ul>
+                        
+                        <h5>Protection Level:</h5>
+                        <div class="progress mb-3">
+                            <div class="progress-bar bg-warning" role="progressbar" style="width: 70%">70%</div>
+                        </div>
+                        
+                        <a href="#contact" class="btn btn-outline-primary w-100">Get Quote</a>
+                    </div>
+                </div>
+
+                <!-- Heavy Duty Bollards -->
+                <div class="col-lg-4 mb-4">
+                    <div class="bollard-comparison border-primary" style="border: 3px solid var(--primary-color);">
+                        <div class="comparison-header">
+                            <h4 class="mb-0">Heavy Duty Bollards</h4>
+                            <span class="badge bg-warning ms-2">RECOMMENDED</span>
+                            <div class="price-badge mt-2">$300 - $500 each</div>
+                        </div>
+                        <div class="text-center mb-4">
+                            <div style="font-size: 4rem; color: var(--primary-color);">
+                                <i class="fas fa-shield-alt"></i>
+                            </div>
+                        </div>
+                        
+                        <h5>Specifications:</h5>
+                        <ul>
+                            <li>6-8 inch diameter</li>
+                            <li>42-48 inch height</li>
+                            <li>Schedule 40 steel pipe</li>
+                            <li>Reinforced concrete base</li>
+                            <li>Reflective bands included</li>
+                        </ul>
+                        
+                        <h5>Best For:</h5>
+                        <ul>
+                            <li>High-traffic daycare centers</li>
+                            <li>Areas near busy streets</li>
+                            <li>Maximum child protection</li>
+                        </ul>
+                        
+                        <h5>Protection Level:</h5>
+                        <div class="progress mb-3">
+                            <div class="progress-bar bg-success" role="progressbar" style="width: 90%">90%</div>
+                        </div>
+                        
+                        <a href="#contact" class="btn btn-primary w-100">Get Quote</a>
+                    </div>
+                </div>
+
+                <!-- Decorative Bollards -->
+                <div class="col-lg-4 mb-4">
+                    <div class="bollard-comparison">
+                        <div class="comparison-header">
+                            <h4 class="mb-0">Decorative Bollards</h4>
+                            <div class="price-badge mt-2">$200 - $400 each</div>
+                        </div>
+                        <div class="text-center mb-4">
+                            <div style="font-size: 4rem; color: var(--accent-color);">
+                                <i class="fas fa-star"></i>
+                            </div>
+                        </div>
+                        
+                        <h5>Specifications:</h5>
+                        <ul>
+                            <li>4-6 inch diameter</li>
+                            <li>36-42 inch height</li>
+                            <li>Cast iron or steel</li>
+                            <li>Decorative caps available</li>
+                            <li>Multiple finish options</li>
+                        </ul>
+                        
+                        <h5>Best For:</h5>
+                        <ul>
+                            <li>Aesthetic-conscious facilities</li>
+                            <li>Historic or upscale areas</li>
+                            <li>Balancing safety and beauty</li>
+                        </ul>
+                        
+                        <h5>Protection Level:</h5>
+                        <div class="progress mb-3">
+                            <div class="progress-bar bg-info" role="progressbar" style="width: 75%">75%</div>
+                        </div>
+                        
+                        <a href="#contact" class="btn btn-outline-primary w-100">Get Quote</a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Additional Options -->
+            <div class="row mt-5">
+                <div class="col-lg-6">
+                    <h3>Optional Features</h3>
+                    <div class="card">
+                        <div class="card-body">
+                            <ul class="list-unstyled">
+                                <li class="mb-2"><i class="fas fa-lightbulb text-warning me-2"></i> <strong>LED Lighting:</strong> Solar or wired options for 24/7 visibility</li>
+                                <li class="mb-2"><i class="fas fa-eye text-info me-2"></i> <strong>Reflective Strips:</strong> Enhanced visibility in low light</li>
+                                <li class="mb-2"><i class="fas fa-palette text-success me-2"></i> <strong>Custom Colors:</strong> Match your facility's branding</li>
+                                <li class="mb-2"><i class="fas fa-lock text-danger me-2"></i> <strong>Locking Caps:</strong> Prevents tampering and theft</li>
+                                <li class="mb-2"><i class="fas fa-recycle text-primary me-2"></i> <strong>Eco-Friendly:</strong> Recycled materials available</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-6">
+                    <h3>Installation Considerations</h3>
+                    <div class="card">
+                        <div class="card-body">
+                            <ul class="list-unstyled">
+                                <li class="mb-2"><i class="fas fa-ruler text-warning me-2"></i> <strong>Spacing:</strong> 4-6 feet apart for optimal protection</li>
+                                <li class="mb-2"><i class="fas fa-map-marker-alt text-info me-2"></i> <strong>Placement:</strong> 3-8 feet from building entrance</li>
+                                <li class="mb-2"><i class="fas fa-tools text-success me-2"></i> <strong>Foundation:</strong> 24-36 inch concrete depth required</li>
+                                <li class="mb-2"><i class="fas fa-calendar text-danger me-2"></i> <strong>Timeline:</strong> 1-2 day installation per site</li>
+                                <li class="mb-2"><i class="fas fa-certificate text-primary me-2"></i> <strong>Permits:</strong> We handle all necessary approvals</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Installation Process -->
+    <section id="installation" class="section-padding bg-light">
+        <div class="container">
+            <h2 class="section-title text-center">Professional Installation Process</h2>
+            
+            <div class="row">
+                <div class="col-lg-3 col-md-6 mb-4">
+                    <div class="card text-center h-100">
+                        <div class="card-body">
+                            <div class="feature-icon" style="background: linear-gradient(135deg, #FF6B6B, #4ECDC4);">
+                                <span style="font-weight: bold; font-size: 2rem;">1</span>
+                            </div>
+                            <h5>Site Assessment</h5>
+                            <p>Our experts visit your facility to evaluate traffic patterns, identify vulnerable areas, and recommend optimal bollard placement.</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-lg-3 col-md-6 mb-4">
+                    <div class="card text-center h-100">
+                        <div class="card-body">
+                            <div class="feature-icon" style="background: linear-gradient(135deg, #4ECDC4, #45B7AF);">
+                                <span style="font-weight: bold; font-size: 2rem;">2</span>
+                            </div>
+                            <h5>Custom Design</h5>
+                            <p>We create a detailed plan showing bollard locations, specifications, and installation timeline tailored to your facility's needs.</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-lg-3 col-md-6 mb-4">
+                    <div class="card text-center h-100">
+                        <div class="card-body">
+                            <div class="feature-icon" style="background: linear-gradient(135deg, #45B7AF, #2E8B57);">
+                                <span style="font-weight: bold; font-size: 2rem;">3</span>
+                            </div>
+                            <h5>Permit & Approval</h5>
+                            <p>We handle all necessary permits, utility markings, and local authority approvals to ensure compliance and safety.</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-lg-3 col-md-6 mb-4">
+                    <div class="card text-center h-100">
+                        <div class="card-body">
+                            <div class="feature-icon" style="background: linear-gradient(135deg, #2E8B57, #246445);">
+                                <span style="font-weight: bold; font-size: 2rem;">4</span>
+                            </div>
+                            <h5>Professional Installation</h5>
+                            <p>Certified installers complete the project with minimal disruption to your daily operations, including cleanup and testing.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row mt-5">
+                <div class="col-lg-8">
+                    <h3>What's Included in Installation</h3>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <ul class="list-unstyled">
+                                <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i> Underground utility location</li>
+                                <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i> Excavation and concrete work</li>
+                                <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i> Bollard placement and alignment</li>
+                                <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i> Concrete finishing and curing</li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <ul class="list-unstyled">
+                                <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i> Site cleanup and restoration</li>
+                                <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i> Safety testing and inspection</li>
+                                <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i> Warranty documentation</li>
+                                <li class="mb-2"><i class="fas fa-check-circle text-success me-2"></i> Maintenance guidelines</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg
