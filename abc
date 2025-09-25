@@ -1,0 +1,416 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+from snowflake.snowpark.context import get_active_session
+
+# Get the current credentials
+session = get_active_session()
+
+# Page configuration
+st.set_page_config(
+    page_title="Data Validation Dashboard",
+    page_icon="❄️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for styling
+st.markdown("""
+<style>
+    .main-header {
+        text-align: center;
+        color: #29B5E8;
+        padding: 20px 0;
+        border-bottom: 3px solid #29B5E8;
+        margin-bottom: 30px;
+    }
+    .logo-container {
+        text-align: center;
+        padding: 20px;
+    }
+    .metric-card {
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid #dee2e6;
+        text-align: center;
+    }
+    .status-match {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 5px 10px;
+        border-radius: 5px;
+    }
+    .status-warning {
+        background-color: #fff3cd;
+        color: #856404;
+        padding: 5px 10px;
+        border-radius: 5px;
+    }
+    .status-mismatch {
+        background-color: #f8d7da;
+        color: #721c24;
+        padding: 5px 10px;
+        border-radius: 5px;
+    }
+    .status-nodata {
+        background-color: #e2e3e5;
+        color: #383d41;
+        padding: 5px 10px;
+        border-radius: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Helper Functions
+@st.cache_data
+def get_rowcount(_session, database, schema, table):
+    if database and schema and table:
+        try:
+            rowcount_result = _session.sql(f"SELECT COUNT(1) AS row_count FROM \"{database}\".\"{schema}\".\"{table}\"").collect()
+            return rowcount_result[0]['ROW_COUNT']
+        except Exception as e:
+            return 0
+    return 0
+
+def get_all_applications(session, environment='DEV'):
+    """Get all unique applications from metadata"""
+    try:
+        env_db_mapping = {
+            'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
+            'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
+            'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
+        }
+        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
+        
+        query = f"""
+        SELECT DISTINCT APPLICATION_NAME
+        FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
+        WHERE ACTIVE_IND = 'Y' AND LOAD_TYPE = 'LOD_TO_LOD'
+        ORDER BY APPLICATION_NAME
+        """
+        result = session.sql(query).collect()
+        return [row['APPLICATION_NAME'] for row in result]
+    except Exception as e:
+        st.error(f"Error fetching applications: {str(e)}")
+        return []
+
+def get_dashboard_data(session, environments, applications):
+    """Get dashboard data for selected environments and applications"""
+    dashboard_data = []
+    
+    env_db_mapping = {
+        'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
+        'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
+        'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
+    }
+    
+    for environment in environments:
+        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
+        
+        for application in applications:
+            try:
+                query = f"""
+                SELECT DISTINCT
+                    APPLICATION_NAME,
+                    LOAD_NAME,
+                    SOURCE_DATABASE_NAME,
+                    SOURCE_SCHEMA_NAME,
+                    SOURCE_TABLE_NAME,
+                    TARGET_DATABASE_NAME,
+                    TARGET_SCHEMA_NAME,
+                    TARGET_TABLE_NAME,
+                    ORCHESTRATION_JOB_NAME
+                FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
+                WHERE APPLICATION_NAME = '{application}'
+                AND ACTIVE_IND = 'Y' 
+                AND LOAD_TYPE = 'LOD_TO_LOD'
+                ORDER BY SOURCE_TABLE_NAME
+                """
+                
+                result = session.sql(query).collect()
+                
+                for row in result:
+                    # Get row counts
+                    source_count = get_rowcount(session, 
+                                              row['SOURCE_DATABASE_NAME'],
+                                              row['SOURCE_SCHEMA_NAME'],
+                                              row['SOURCE_TABLE_NAME'])
+                    
+                    target_count = get_rowcount(session,
+                                              row['TARGET_DATABASE_NAME'],
+                                              row['TARGET_SCHEMA_NAME'],
+                                              row['TARGET_TABLE_NAME'])
+                    
+                    # Calculate variance
+                    if source_count > 0:
+                        variance = abs((source_count - target_count) / source_count * 100)
+                    else:
+                        variance = 100 if target_count > 0 else 0
+                    
+                    # Determine status
+                    if target_count == 0:
+                        status = "NO DATA"
+                    elif variance <= 1:
+                        status = "MATCH"
+                    elif variance <= 5:
+                        status = "WARNING"
+                    else:
+                        status = "MISMATCH"
+                    
+                    dashboard_data.append({
+                        'Environment': environment,
+                        'Application': row['APPLICATION_NAME'],
+                        'Load Name': row['LOAD_NAME'],
+                        'Source Table': row['SOURCE_TABLE_NAME'],
+                        'Target Table': row['TARGET_TABLE_NAME'],
+                        'Source Count': source_count,
+                        'Target Count': target_count,
+                        'Variance %': round(variance, 2),
+                        'Status': status,
+                        'Job Name': row['ORCHESTRATION_JOB_NAME']
+                    })
+                    
+            except Exception as e:
+                st.error(f"Error fetching data for {application} in {environment}: {str(e)}")
+    
+    return dashboard_data
+
+# Header with Logo
+col1, col2, col3 = st.columns([1, 2, 1])
+
+with col2:
+    st.markdown("""
+    <div class="logo-container">
+        <svg width="120" height="120" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+            <path fill="#29B5E8" d="M128 0L256 64v128l-128 64L0 192V64L128 0z"/>
+            <path fill="#FFFFFF" d="M128 32L32 80v96l96 48l96-48V80L128 32zm0 24l80 40v80l-80 40l-80-40V96l80-40z"/>
+        </svg>
+        <h1 style="color: #29B5E8; margin-top: 10px;">❄️ Data Validation Dashboard</h1>
+        <p style="color: #6c757d;">Multi-Environment Migration Monitoring</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("---")
+
+# Sidebar Filters
+with st.sidebar:
+    st.markdown("### 🔍 Dashboard Filters")
+    st.markdown("---")
+    
+    # Environment Selection
+    selected_environments = st.multiselect(
+        "Select Environments",
+        options=['DEV', 'TEST', 'UAT'],
+        default=['DEV'],
+        key="dashboard_environments",
+        help="Choose one or more environments to monitor"
+    )
+    
+    # Application Selection
+    if selected_environments:
+        all_applications = get_all_applications(session, selected_environments[0])
+        
+        selected_applications = st.multiselect(
+            "Select Applications",
+            options=all_applications,
+            default=all_applications[:3] if len(all_applications) >= 3 else all_applications,
+            key="dashboard_applications",
+            help="Choose applications to monitor"
+        )
+    else:
+        st.info("Please select at least one environment")
+        selected_applications = []
+    
+    st.markdown("---")
+    
+    # Refresh button
+    if st.button("🔄 Refresh Data", use_container_width=True, type="primary"):
+        st.cache_data.clear()
+        st.rerun()
+    
+    st.markdown("---")
+    st.markdown("**Last Updated:**")
+    st.text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+# Main Dashboard Content
+if selected_environments and selected_applications:
+    with st.spinner("Loading dashboard data..."):
+        dashboard_data = get_dashboard_data(session, selected_environments, selected_applications)
+    
+    if dashboard_data:
+        df_dashboard = pd.DataFrame(dashboard_data)
+        
+        # Summary Statistics
+        st.markdown("### 📈 Summary Statistics")
+        
+        total_tables = len(df_dashboard)
+        match_tables = len(df_dashboard[df_dashboard['Status'] == 'MATCH'])
+        warning_tables = len(df_dashboard[df_dashboard['Status'] == 'WARNING'])
+        mismatch_tables = len(df_dashboard[df_dashboard['Status'] == 'MISMATCH'])
+        no_data_tables = len(df_dashboard[df_dashboard['Status'] == 'NO DATA'])
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("Total Tables", total_tables)
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("✅ Match", match_tables, 
+                     delta=f"{(match_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col3:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("⚠️ Warning", warning_tables,
+                     delta=f"{(warning_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col4:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("❌ Mismatch", mismatch_tables,
+                     delta=f"{(mismatch_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
+                     delta_color="inverse")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with col5:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.metric("📭 No Data", no_data_tables,
+                     delta=f"{(no_data_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
+                     delta_color="inverse")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # Table Filters
+        st.markdown("### 🔎 Filter Results")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            status_filter = st.multiselect(
+                "Filter by Status",
+                options=['MATCH', 'WARNING', 'MISMATCH', 'NO DATA'],
+                default=['MATCH', 'WARNING', 'MISMATCH', 'NO DATA'],
+                key="status_filter"
+            )
+        
+        with col2:
+            env_filter = st.multiselect(
+                "Filter by Environment",
+                options=selected_environments,
+                default=selected_environments,
+                key="env_filter"
+            )
+        
+        with col3:
+            app_filter = st.multiselect(
+                "Filter by Application",
+                options=selected_applications,
+                default=selected_applications,
+                key="app_filter"
+            )
+        
+        # Apply filters
+        df_filtered = df_dashboard[
+            (df_dashboard['Status'].isin(status_filter)) &
+            (df_dashboard['Environment'].isin(env_filter)) &
+            (df_dashboard['Application'].isin(app_filter))
+        ]
+        
+        st.markdown("---")
+        st.markdown(f"### 📋 Validation Results ({len(df_filtered)} tables)")
+        
+        # Color coding function
+        def highlight_status(row):
+            if row['Status'] == 'MATCH':
+                return ['background-color: #d4edda'] * len(row)
+            elif row['Status'] == 'WARNING':
+                return ['background-color: #fff3cd'] * len(row)
+            elif row['Status'] == 'MISMATCH':
+                return ['background-color: #f8d7da'] * len(row)
+            elif row['Status'] == 'NO DATA':
+                return ['background-color: #e2e3e5'] * len(row)
+            return [''] * len(row)
+        
+        # Display filtered data
+        styled_df = df_filtered.style.apply(highlight_status, axis=1)
+        
+        st.dataframe(
+            styled_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Source Count": st.column_config.NumberColumn(format="%d"),
+                "Target Count": st.column_config.NumberColumn(format="%d"),
+                "Variance %": st.column_config.NumberColumn(format="%.2f%%"),
+            }
+        )
+        
+        # Download button
+        st.markdown("---")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            csv = df_filtered.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Dashboard Data (CSV)",
+                data=csv,
+                file_name=f"validation_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                type="primary"
+            )
+        
+        # Environment Breakdown
+        st.markdown("---")
+        st.markdown("### 🌍 Environment Breakdown")
+        
+        for env in selected_environments:
+            with st.expander(f"📊 {env} Environment Details", expanded=False):
+                env_data = df_filtered[df_filtered['Environment'] == env]
+                
+                if not env_data.empty:
+                    env_match = len(env_data[env_data['Status'] == 'MATCH'])
+                    env_total = len(env_data)
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric(f"{env} Total", env_total)
+                    with col2:
+                        st.metric(f"{env} Match", env_match)
+                    with col3:
+                        st.metric(f"{env} Issues", env_total - env_match)
+                    with col4:
+                        st.metric(f"{env} Success Rate", f"{(env_match/env_total*100):.1f}%")
+                    
+                    st.markdown("---")
+                    
+                    # Group by application
+                    st.markdown(f"**📱 Applications in {env}:**")
+                    for app in env_data['Application'].unique():
+                        app_data = env_data[env_data['Application'] == app]
+                        app_match = len(app_data[app_data['Status'] == 'MATCH'])
+                        app_total = len(app_data)
+                        
+                        status_icon = "✅" if app_match == app_total else "⚠️" if app_match > 0 else "❌"
+                        st.markdown(f"{status_icon} **{app}**: {app_match}/{app_total} tables matching ({(app_match/app_total*100):.1f}%)")
+                else:
+
+
+                    st.info(f"No data for {env} environment with current filters")
+    
+    else:
+        st.warning("⚠️ No data found for selected environments and applications")
+
+else:
+    st.info("👈 Please select at least one environment and one application from the sidebar to view the dashboard")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #6c757d; padding: 20px;">
+    <p>❄️ Snowflake Data Validation Dashboard | Built with Streamlit</p>
+</div>
+""", unsafe_allow_html=True)
