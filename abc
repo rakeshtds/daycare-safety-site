@@ -18,46 +18,17 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-header {
-        text-align: center;
-        color: #29B5E8;
-        padding: 20px 0;
-        border-bottom: 3px solid #29B5E8;
-        margin-bottom: 30px;
-    }
-    .logo-container {
-        text-align: center;
-        padding: 20px;
+        color: #1f77b4;
+        padding: 10px 0;
+        border-bottom: 2px solid #e0e0e0;
+        margin-bottom: 20px;
     }
     .metric-card {
         background-color: #f8f9fa;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #dee2e6;
-        text-align: center;
-    }
-    .status-match {
-        background-color: #d4edda;
-        color: #155724;
-        padding: 5px 10px;
-        border-radius: 5px;
-    }
-    .status-warning {
-        background-color: #fff3cd;
-        color: #856404;
-        padding: 5px 10px;
-        border-radius: 5px;
-    }
-    .status-mismatch {
-        background-color: #f8d7da;
-        color: #721c24;
-        padding: 5px 10px;
-        border-radius: 5px;
-    }
-    .status-nodata {
-        background-color: #e2e3e5;
-        color: #383d41;
-        padding: 5px 10px;
-        border-radius: 5px;
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid #1f77b4;
+        margin: 5px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -176,35 +147,21 @@ def get_dashboard_data(session, environments, load_names):
     
     return dashboard_data
 
-# Header with Logo
-col1, col2, col3 = st.columns([1, 2, 1])
-
-with col2:
-    st.markdown("""
-    <div class="logo-container">
-        <svg width="120" height="120" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
-            <path fill="#29B5E8" d="M128 0L256 64v128l-128 64L0 192V64L128 0z"/>
-            <path fill="#FFFFFF" d="M128 32L32 80v96l96 48l96-48V80L128 32zm0 24l80 40v80l-80 40l-80-40V96l80-40z"/>
-        </svg>
-        <h1 style="color: #29B5E8; margin-top: 10px;">❄️ Data Validation Dashboard</h1>
-        <p style="color: #6c757d;">Multi-Environment Migration Monitoring</p>
-    </div>
-    """, unsafe_allow_html=True)
-
+# Header
+st.markdown('<h1 class="main-header">Data Validation Dashboard</h1>', unsafe_allow_html=True)
+st.markdown("Multi-Environment Migration Monitoring")
 st.markdown("---")
 
 # Sidebar Filters
 with st.sidebar:
-    st.markdown("### 🔍 Dashboard Filters")
-    st.markdown("---")
+    st.markdown("## Filters")
     
     # Environment Selection
     selected_environments = st.multiselect(
-        "Select Environments",
+        "Environments",
         options=['DEV', 'TEST', 'UAT'],
         default=['DEV'],
-        key="dashboard_environments",
-        help="Choose one or more environments to monitor"
+        key="dashboard_environments"
     )
     
     # Application Selection
@@ -212,26 +169,23 @@ with st.sidebar:
         all_load_names = get_all_load_names(session, selected_environments[0])
         
         selected_load_names = st.multiselect(
-            "Select Load Names",
+            "Load Names",
             options=all_load_names,
-            default=all_load_names[:3] if len(all_load_names) >= 3 else all_load_names,
-            key="dashboard_load_names",
-            help="Choose load names to monitor"
+            default=all_load_names if all_load_names else [],
+            key="dashboard_load_names"
         )
     else:
-        st.info("Please select at least one environment")
+        st.info("Select at least one environment")
         selected_load_names = []
     
     st.markdown("---")
     
     # Refresh button
-    if st.button("🔄 Refresh Data", use_container_width=True, type="primary"):
+    if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
     
-    st.markdown("---")
-    st.markdown("**Last Updated:**")
-    st.text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # Main Dashboard Content
 if selected_environments and selected_load_names:
@@ -242,7 +196,7 @@ if selected_environments and selected_load_names:
         df_dashboard = pd.DataFrame(dashboard_data)
         
         # Summary Statistics
-        st.markdown("### 📈 Summary Statistics")
+        st.markdown("### Summary Statistics")
         
         total_tables = len(df_dashboard)
         match_tables = len(df_dashboard[df_dashboard['Status'] == 'MATCH'])
@@ -253,40 +207,30 @@ if selected_environments and selected_load_names:
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
             st.metric("Total Tables", total_tables)
-            st.markdown('</div>', unsafe_allow_html=True)
         
         with col2:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("✅ Match", match_tables, 
+            st.metric("Match", match_tables, 
                      delta=f"{(match_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
-            st.markdown('</div>', unsafe_allow_html=True)
         
         with col3:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("⚠️ Warning", warning_tables,
+            st.metric("Warning", warning_tables,
                      delta=f"{(warning_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
-            st.markdown('</div>', unsafe_allow_html=True)
         
         with col4:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("❌ Mismatch", mismatch_tables,
+            st.metric("Mismatch", mismatch_tables,
                      delta=f"{(mismatch_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
                      delta_color="inverse")
-            st.markdown('</div>', unsafe_allow_html=True)
         
         with col5:
-            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("📭 No Data", no_data_tables,
+            st.metric("No Data", no_data_tables,
                      delta=f"{(no_data_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
                      delta_color="inverse")
-            st.markdown('</div>', unsafe_allow_html=True)
         
         st.markdown("---")
         
         # Table Filters
-        st.markdown("### 🔎 Filter Results")
+        st.markdown("### Filter Results")
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -321,7 +265,7 @@ if selected_environments and selected_load_names:
         ]
         
         st.markdown("---")
-        st.markdown(f"### 📋 Validation Results ({len(df_filtered)} tables)")
+        st.markdown(f"### Validation Results ({len(df_filtered)} tables)")
         
         # Color coding function
         def highlight_status(row):
@@ -351,24 +295,20 @@ if selected_environments and selected_load_names:
         
         # Download button
         st.markdown("---")
-        col1, col2, col3 = st.columns([1, 1, 1])
-        with col2:
-            csv = df_filtered.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Dashboard Data (CSV)",
-                data=csv,
-                file_name=f"validation_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                type="primary"
-            )
+        csv = df_filtered.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download CSV",
+            data=csv,
+            file_name=f"validation_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
         
         # Environment Breakdown
         st.markdown("---")
-        st.markdown("### 🌍 Environment Breakdown")
+        st.markdown("### Environment Breakdown")
         
         for env in selected_environments:
-            with st.expander(f"📊 {env} Environment Details", expanded=False):
+            with st.expander(f"{env} Environment", expanded=False):
                 env_data = df_filtered[df_filtered['Environment'] == env]
                 
                 if not env_data.empty:
@@ -388,27 +328,23 @@ if selected_environments and selected_load_names:
                     st.markdown("---")
                     
                     # Group by load name
-                    st.markdown(f"**📱 Load Names in {env}:**")
+                    st.markdown(f"**Load Names in {env}:**")
                     for load_name in env_data['Load Name'].unique():
                         load_data = env_data[env_data['Load Name'] == load_name]
                         load_match = len(load_data[load_data['Status'] == 'MATCH'])
                         load_total = len(load_data)
                         
                         status_icon = "✅" if load_match == load_total else "⚠️" if load_match > 0 else "❌"
-                        st.markdown(f"{status_icon} **{load_name}**: {load_match}/{load_total} tables matching ({(load_match/load_total*100):.1f}%)")
+                        st.write(f"{status_icon} {load_name}: {load_match}/{load_total} tables matching ({(load_match/load_total*100):.1f}%)")
                 else:
                     st.info(f"No data for {env} environment with current filters")
     
     else:
-        st.warning("⚠️ No data found for selected environments and applications")
+        st.warning("No data found for selected environments and load names")
 
 else:
-    st.info("👈 Please select at least one environment and one load name from the sidebar to view the dashboard")
+    st.info("Please select at least one environment and one load name from the sidebar")
 
 # Footer
 st.markdown("---")
-st.markdown("""
-<div style="text-align: center; color: #6c757d; padding: 20px;">
-    <p>❄️ Snowflake Data Validation Dashboard | Built with Streamlit</p>
-</div>
-""", unsafe_allow_html=True)
+st.caption("Data Validation Dashboard | Powered by Snowflake")
