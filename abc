@@ -73,8 +73,8 @@ def get_rowcount(_session, database, schema, table):
             return 0
     return 0
 
-def get_all_applications(session, environment='DEV'):
-    """Get all unique applications from metadata"""
+def get_all_load_names(session, environment='DEV'):
+    """Get all unique load names from metadata"""
     try:
         env_db_mapping = {
             'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
@@ -84,19 +84,19 @@ def get_all_applications(session, environment='DEV'):
         metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
         
         query = f"""
-        SELECT DISTINCT APPLICATION_NAME
+        SELECT DISTINCT LOAD_NAME
         FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
         WHERE ACTIVE_IND = 'Y' AND LOAD_TYPE = 'LOD_TO_LOD'
-        ORDER BY APPLICATION_NAME
+        ORDER BY LOAD_NAME
         """
         result = session.sql(query).collect()
-        return [row['APPLICATION_NAME'] for row in result]
+        return [row['LOAD_NAME'] for row in result]
     except Exception as e:
-        st.error(f"Error fetching applications: {str(e)}")
+        st.error(f"Error fetching load names: {str(e)}")
         return []
 
-def get_dashboard_data(session, environments, applications):
-    """Get dashboard data for selected environments and applications"""
+def get_dashboard_data(session, environments, load_names):
+    """Get dashboard data for selected environments and load names"""
     dashboard_data = []
     
     env_db_mapping = {
@@ -108,7 +108,7 @@ def get_dashboard_data(session, environments, applications):
     for environment in environments:
         metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
         
-        for application in applications:
+        for load_name in load_names:
             try:
                 query = f"""
                 SELECT DISTINCT
@@ -122,7 +122,7 @@ def get_dashboard_data(session, environments, applications):
                     TARGET_TABLE_NAME,
                     ORCHESTRATION_JOB_NAME
                 FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
-                WHERE APPLICATION_NAME = '{application}'
+                WHERE LOAD_NAME = '{load_name}'
                 AND ACTIVE_IND = 'Y' 
                 AND LOAD_TYPE = 'LOD_TO_LOD'
                 ORDER BY SOURCE_TABLE_NAME
@@ -160,8 +160,8 @@ def get_dashboard_data(session, environments, applications):
                     
                     dashboard_data.append({
                         'Environment': environment,
-                        'Application': row['APPLICATION_NAME'],
                         'Load Name': row['LOAD_NAME'],
+                        'Application': row['APPLICATION_NAME'],
                         'Source Table': row['SOURCE_TABLE_NAME'],
                         'Target Table': row['TARGET_TABLE_NAME'],
                         'Source Count': source_count,
@@ -172,7 +172,7 @@ def get_dashboard_data(session, environments, applications):
                     })
                     
             except Exception as e:
-                st.error(f"Error fetching data for {application} in {environment}: {str(e)}")
+                st.error(f"Error fetching data for {load_name} in {environment}: {str(e)}")
     
     return dashboard_data
 
@@ -209,18 +209,18 @@ with st.sidebar:
     
     # Application Selection
     if selected_environments:
-        all_applications = get_all_applications(session, selected_environments[0])
+        all_load_names = get_all_load_names(session, selected_environments[0])
         
-        selected_applications = st.multiselect(
-            "Select Applications",
-            options=all_applications,
-            default=all_applications[:3] if len(all_applications) >= 3 else all_applications,
-            key="dashboard_applications",
-            help="Choose applications to monitor"
+        selected_load_names = st.multiselect(
+            "Select Load Names",
+            options=all_load_names,
+            default=all_load_names[:3] if len(all_load_names) >= 3 else all_load_names,
+            key="dashboard_load_names",
+            help="Choose load names to monitor"
         )
     else:
         st.info("Please select at least one environment")
-        selected_applications = []
+        selected_load_names = []
     
     st.markdown("---")
     
@@ -234,9 +234,9 @@ with st.sidebar:
     st.text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 # Main Dashboard Content
-if selected_environments and selected_applications:
+if selected_environments and selected_load_names:
     with st.spinner("Loading dashboard data..."):
-        dashboard_data = get_dashboard_data(session, selected_environments, selected_applications)
+        dashboard_data = get_dashboard_data(session, selected_environments, selected_load_names)
     
     if dashboard_data:
         df_dashboard = pd.DataFrame(dashboard_data)
@@ -307,17 +307,17 @@ if selected_environments and selected_applications:
         
         with col3:
             app_filter = st.multiselect(
-                "Filter by Application",
-                options=selected_applications,
-                default=selected_applications,
-                key="app_filter"
+                "Filter by Load Name",
+                options=selected_load_names,
+                default=selected_load_names,
+                key="load_name_filter"
             )
         
         # Apply filters
         df_filtered = df_dashboard[
             (df_dashboard['Status'].isin(status_filter)) &
             (df_dashboard['Environment'].isin(env_filter)) &
-            (df_dashboard['Application'].isin(app_filter))
+            (df_dashboard['Load Name'].isin(app_filter))
         ]
         
         st.markdown("---")
@@ -387,25 +387,23 @@ if selected_environments and selected_applications:
                     
                     st.markdown("---")
                     
-                    # Group by application
-                    st.markdown(f"**📱 Applications in {env}:**")
-                    for app in env_data['Application'].unique():
-                        app_data = env_data[env_data['Application'] == app]
-                        app_match = len(app_data[app_data['Status'] == 'MATCH'])
-                        app_total = len(app_data)
+                    # Group by load name
+                    st.markdown(f"**📱 Load Names in {env}:**")
+                    for load_name in env_data['Load Name'].unique():
+                        load_data = env_data[env_data['Load Name'] == load_name]
+                        load_match = len(load_data[load_data['Status'] == 'MATCH'])
+                        load_total = len(load_data)
                         
-                        status_icon = "✅" if app_match == app_total else "⚠️" if app_match > 0 else "❌"
-                        st.markdown(f"{status_icon} **{app}**: {app_match}/{app_total} tables matching ({(app_match/app_total*100):.1f}%)")
+                        status_icon = "✅" if load_match == load_total else "⚠️" if load_match > 0 else "❌"
+                        st.markdown(f"{status_icon} **{load_name}**: {load_match}/{load_total} tables matching ({(load_match/load_total*100):.1f}%)")
                 else:
-
-
                     st.info(f"No data for {env} environment with current filters")
     
     else:
         st.warning("⚠️ No data found for selected environments and applications")
 
 else:
-    st.info("👈 Please select at least one environment and one application from the sidebar to view the dashboard")
+    st.info("👈 Please select at least one environment and one load name from the sidebar to view the dashboard")
 
 # Footer
 st.markdown("---")
