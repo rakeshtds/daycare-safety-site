@@ -1,0 +1,208 @@
+. First, add this helper function after your existing helper functions:
+pythondef get_job_id(session, matillion_mapping_spec_name, environment='DEV'):
+    """Get job_id from JOB_MASTER_DPC table based on MATILLION_MAPPING_SPEC_NAME"""
+    try:
+        env_db_mapping = {
+            'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
+            'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
+            'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
+        }
+        
+        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
+        
+        query = f"""
+        SELECT job_id 
+        FROM {metadata_db}.GLOBAL.JOB_MASTER_DPC
+        WHERE BUSINESS_AREA = 'PROFISEED'
+        AND MATILLION_MAPPING_SPEC_NAME IN('{matillion_mapping_spec_name}')
+        LIMIT 1
+        """
+        
+        result = session.sql(query).collect()
+        return result[0]['JOB_ID'] if result else None
+        
+    except Exception as e:
+        return None
+2. Update the get_metadata_config function:
+pythondef get_metadata_config(session, load_name, environment='DEV'):
+    """Get metadata configuration based on load name and environment"""
+    try:
+        env_db_mapping = {
+            'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
+            'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
+            'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
+        }
+        
+        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
+        
+        query = f"""
+        SELECT DISTINCT
+            APPLICATION_NAME,
+            SOURCE_DATABASE_NAME,
+            SOURCE_SCHEMA_NAME,
+            SOURCE_TABLE_NAME,
+            TARGET_DATABASE_NAME,
+            TARGET_SCHEMA_NAME,
+            TARGET_TABLE_NAME,
+            ORCHESTRATION_JOB_NAME,
+            MATILLION_MAPPING_SPEC_NAME
+        FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
+        WHERE LOAD_NAME = '{load_name}' AND ACTIVE_IND = 'Y' AND LOAD_TYPE = 'LOD_TO_LOD'
+        ORDER BY SOURCE_TABLE_NAME
+        """
+        result = session.sql(query).collect()
+        
+        # Enrich with job_id
+        enriched_result = []
+        for row in result:
+            row_dict = row.asDict()
+            # Get job_id for this mapping spec
+            matillion_spec = row['MATILLION_MAPPING_SPEC_NAME']
+            job_id = get_job_id(session, matillion_spec, environment) if matillion_spec else None
+            row_dict['JOB_ID'] = job_id
+            enriched_result.append(row_dict)
+        
+        return enriched_result
+        
+    except Exception as e:
+        st.error(f"Error fetching metadata configuration from {environment}: {str(e)}")
+        return []
+3. Update where you store source_configs (in the metadata-based source configuration section):
+pythonsource_configs.append({
+    'source_database': selected_config['SOURCE_DATABASE_NAME'],
+    'source_schema': selected_config['SOURCE_SCHEMA_NAME'],
+    'source_table': selected_config['SOURCE_TABLE_NAME'],
+    'target_database': selected_config['TARGET_DATABASE_NAME'],
+    'target_schema': selected_config['TARGET_SCHEMA_NAME'],
+    'target_table': selected_config['TARGET_TABLE_NAME'],
+    'application': selected_config['APPLICATION_NAME'],
+    'orchestration_job': selected_config['ORCHESTRATION_JOB_NAME'],
+    'matillion_mapping_spec': selected_config.get('MATILLION_MAPPING_SPEC_NAME', ''),
+    'job_id': selected_config.get('JOB_ID', ''),  # NEW
+    'environment': selected_environment,
+    'metadata_db': selected_db,
+    'source_full_name': source_full_name,
+    'target_full_name': target_full_name
+})
+4. Update the Results Summary Table section to include Job ID:
+python# In the Results page, update the results_data creation:
+for test_key, result in results.items():
+    row = {
+        'Test Case': test_names.get(test_key, test_key),
+        'Status': result['status'],
+        'Message': result['message']
+    }
+    
+    # Add Source, Target, and Job ID details
+    if is_multi_table:
+        row['Source'] = f"Load: {source_config.get('load_name', 'N/A')}"
+        table_count = len(source_config.get('table_configs', []))
+        row['Target'] = f"{table_count} Target Tables"
+        row['Job ID'] = 'Multiple'  # NEW
+    else:
+        row['Source'] = source_config.get('full_name', 'N/A')
+        row['Target'] = target_config.get('full_name', 'N/A')
+        # Get job_id from first table config if available
+        table_configs = source_config.get('table_configs', [])
+        row['Job ID'] = table_configs[0].get('job_id', 'N/A') if table_configs else 'N/A'  # NEW
+    
+    results_data.append(row)
+
+# Update column order
+column_order = ['Test Case', 'Source', 'Target', 'Job ID', 'Status', 'Message']  # Added Job ID
+5. For the Dashboard app, update get_dashboard_data function:
+pythondef get_dashboard_data(session, environments, load_names):
+    """Get dashboard data for selected environments and load names"""
+    dashboard_data = []
+    
+    env_db_mapping = {
+        'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
+        'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
+        'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
+    }
+    
+    for environment in environments:
+        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
+        
+        for load_name in load_names:
+            try:
+                query = f"""
+                SELECT DISTINCT
+                    APPLICATION_NAME,
+                    LOAD_NAME,
+                    SOURCE_DATABASE_NAME,
+                    SOURCE_SCHEMA_NAME,
+                    SOURCE_TABLE_NAME,
+                    TARGET_DATABASE_NAME,
+                    TARGET_SCHEMA_NAME,
+                    TARGET_TABLE_NAME,
+                    ORCHESTRATION_JOB_NAME,
+                    MATILLION_MAPPING_SPEC_NAME
+                FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
+                WHERE LOAD_NAME = '{load_name}'
+                AND ACTIVE_IND = 'Y' 
+                AND LOAD_TYPE = 'LOD_TO_LOD'
+                ORDER BY SOURCE_TABLE_NAME
+                """
+                
+                result = session.sql(query).collect()
+                
+                for row in result:
+                    # Get job_id
+                    matillion_spec = row['MATILLION_MAPPING_SPEC_NAME']
+                    job_id = get_job_id(session, matillion_spec, environment) if matillion_spec else None
+                    
+                    # Get row counts
+                    source_count = get_rowcount(session, 
+                                              row['SOURCE_DATABASE_NAME'],
+                                              row['SOURCE_SCHEMA_NAME'],
+                                              row['SOURCE_TABLE_NAME'])
+                    
+                    target_count = get_rowcount(session,
+                                              row['TARGET_DATABASE_NAME'],
+                                              row['TARGET_SCHEMA_NAME'],
+                                              row['TARGET_TABLE_NAME'])
+                    
+                    # Calculate variance
+                    if source_count > 0:
+                        variance = abs((source_count - target_count) / source_count * 100)
+                    else:
+                        variance = 100 if target_count > 0 else 0
+                    
+                    # Determine status
+                    if target_count == 0:
+                        status = "NO DATA"
+                    elif variance <= 1:
+                        status = "MATCH"
+                    elif variance <= 5:
+                        status = "WARNING"
+                    else:
+                        status = "MISMATCH"
+                    
+                    dashboard_data.append({
+                        'Environment': environment,
+                        'Load Name': row['LOAD_NAME'],
+                        'Application': row['APPLICATION_NAME'],
+                        'Job ID': job_id or 'N/A',  # NEW
+                        'Source Table': row['SOURCE_TABLE_NAME'],
+                        'Target Table': row['TARGET_TABLE_NAME'],
+                        'Source Count': source_count,
+                        'Target Count': target_count,
+                        'Variance %': round(variance, 2),
+                        'Status': status,
+                        'Job Name': row['ORCHESTRATION_JOB_NAME']
+                    })
+                    
+            except Exception as e:
+                st.error(f"Error fetching data for {load_name} in {environment}: {str(e)}")
+    
+    return dashboard_data
+These changes will:
+
+Query the JOB_MASTER_DPC table for each MATILLION_MAPPING_SPEC_NAME
+Add job_id to all your configuration data
+Display job_id in the results summary table
+Show job_id in the dashboard for each table
+Work across all environments (DEV, TEST, UAT)
+
+The job_id will now be visible throughout 
