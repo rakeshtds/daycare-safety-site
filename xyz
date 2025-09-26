@@ -1,5 +1,50 @@
-. First, add this helper function after your existing helper functions:
-pythondef get_job_id(session, matillion_mapping_spec_name, environment='DEV'):
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+from snowflake.snowpark.context import get_active_session
+
+# Get the current credentials
+session = get_active_session()
+
+# Page configuration
+st.set_page_config(
+    page_title="Data Validation Dashboard",
+    page_icon="❄️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for styling
+st.markdown("""
+<style>
+    .main-header {
+        color: #1f77b4;
+        padding: 10px 0;
+        border-bottom: 2px solid #e0e0e0;
+        margin-bottom: 20px;
+    }
+    .metric-card {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid #1f77b4;
+        margin: 5px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Helper Functions
+@st.cache_data
+def get_rowcount(_session, database, schema, table):
+    if database and schema and table:
+        try:
+            rowcount_result = _session.sql(f"SELECT COUNT(1) AS row_count FROM \"{database}\".\"{schema}\".\"{table}\"").collect()
+            return rowcount_result[0]['ROW_COUNT']
+        except Exception as e:
+            return 0
+    return 0
+
+def get_job_id(session, matillion_mapping_spec_name, environment='DEV'):
     """Get job_id from JOB_MASTER_DPC table based on MATILLION_MAPPING_SPEC_NAME"""
     try:
         env_db_mapping = {
@@ -23,95 +68,30 @@ pythondef get_job_id(session, matillion_mapping_spec_name, environment='DEV'):
         
     except Exception as e:
         return None
-2. Update the get_metadata_config function:
-pythondef get_metadata_config(session, load_name, environment='DEV'):
-    """Get metadata configuration based on load name and environment"""
+
+def get_all_load_names(session, environment='DEV'):
+    """Get all unique load names from metadata"""
     try:
         env_db_mapping = {
             'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
             'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
             'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
         }
-        
         metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
         
         query = f"""
-        SELECT DISTINCT
-            APPLICATION_NAME,
-            SOURCE_DATABASE_NAME,
-            SOURCE_SCHEMA_NAME,
-            SOURCE_TABLE_NAME,
-            TARGET_DATABASE_NAME,
-            TARGET_SCHEMA_NAME,
-            TARGET_TABLE_NAME,
-            ORCHESTRATION_JOB_NAME,
-            MATILLION_MAPPING_SPEC_NAME
+        SELECT DISTINCT LOAD_NAME
         FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
-        WHERE LOAD_NAME = '{load_name}' AND ACTIVE_IND = 'Y' AND LOAD_TYPE = 'LOD_TO_LOD'
-        ORDER BY SOURCE_TABLE_NAME
+        WHERE ACTIVE_IND = 'Y' AND LOAD_TYPE = 'LOD_TO_LOD'
+        ORDER BY LOAD_NAME
         """
         result = session.sql(query).collect()
-        
-        # Enrich with job_id
-        enriched_result = []
-        for row in result:
-            row_dict = row.asDict()
-            # Get job_id for this mapping spec
-            matillion_spec = row['MATILLION_MAPPING_SPEC_NAME']
-            job_id = get_job_id(session, matillion_spec, environment) if matillion_spec else None
-            row_dict['JOB_ID'] = job_id
-            enriched_result.append(row_dict)
-        
-        return enriched_result
-        
+        return [row['LOAD_NAME'] for row in result]
     except Exception as e:
-        st.error(f"Error fetching metadata configuration from {environment}: {str(e)}")
+        st.error(f"Error fetching load names: {str(e)}")
         return []
-3. Update where you store source_configs (in the metadata-based source configuration section):
-pythonsource_configs.append({
-    'source_database': selected_config['SOURCE_DATABASE_NAME'],
-    'source_schema': selected_config['SOURCE_SCHEMA_NAME'],
-    'source_table': selected_config['SOURCE_TABLE_NAME'],
-    'target_database': selected_config['TARGET_DATABASE_NAME'],
-    'target_schema': selected_config['TARGET_SCHEMA_NAME'],
-    'target_table': selected_config['TARGET_TABLE_NAME'],
-    'application': selected_config['APPLICATION_NAME'],
-    'orchestration_job': selected_config['ORCHESTRATION_JOB_NAME'],
-    'matillion_mapping_spec': selected_config.get('MATILLION_MAPPING_SPEC_NAME', ''),
-    'job_id': selected_config.get('JOB_ID', ''),  # NEW
-    'environment': selected_environment,
-    'metadata_db': selected_db,
-    'source_full_name': source_full_name,
-    'target_full_name': target_full_name
-})
-4. Update the Results Summary Table section to include Job ID:
-python# In the Results page, update the results_data creation:
-for test_key, result in results.items():
-    row = {
-        'Test Case': test_names.get(test_key, test_key),
-        'Status': result['status'],
-        'Message': result['message']
-    }
-    
-    # Add Source, Target, and Job ID details
-    if is_multi_table:
-        row['Source'] = f"Load: {source_config.get('load_name', 'N/A')}"
-        table_count = len(source_config.get('table_configs', []))
-        row['Target'] = f"{table_count} Target Tables"
-        row['Job ID'] = 'Multiple'  # NEW
-    else:
-        row['Source'] = source_config.get('full_name', 'N/A')
-        row['Target'] = target_config.get('full_name', 'N/A')
-        # Get job_id from first table config if available
-        table_configs = source_config.get('table_configs', [])
-        row['Job ID'] = table_configs[0].get('job_id', 'N/A') if table_configs else 'N/A'  # NEW
-    
-    results_data.append(row)
 
-# Update column order
-column_order = ['Test Case', 'Source', 'Target', 'Job ID', 'Status', 'Message']  # Added Job ID
-5. For the Dashboard app, update get_dashboard_data function:
-pythondef get_dashboard_data(session, environments, load_names):
+def get_dashboard_data(session, environments, load_names):
     """Get dashboard data for selected environments and load names"""
     dashboard_data = []
     
@@ -183,7 +163,7 @@ pythondef get_dashboard_data(session, environments, load_names):
                         'Environment': environment,
                         'Load Name': row['LOAD_NAME'],
                         'Application': row['APPLICATION_NAME'],
-                        'Job ID': job_id or 'N/A',  # NEW
+                        'Job ID': job_id or 'N/A',
                         'Source Table': row['SOURCE_TABLE_NAME'],
                         'Target Table': row['TARGET_TABLE_NAME'],
                         'Source Count': source_count,
@@ -197,12 +177,205 @@ pythondef get_dashboard_data(session, environments, load_names):
                 st.error(f"Error fetching data for {load_name} in {environment}: {str(e)}")
     
     return dashboard_data
-These changes will:
 
-Query the JOB_MASTER_DPC table for each MATILLION_MAPPING_SPEC_NAME
-Add job_id to all your configuration data
-Display job_id in the results summary table
-Show job_id in the dashboard for each table
-Work across all environments (DEV, TEST, UAT)
+# Header
+st.markdown('<h1 class="main-header">Data Validation Dashboard</h1>', unsafe_allow_html=True)
+st.markdown("Multi-Environment Migration Monitoring")
+st.markdown("---")
 
-The job_id will now be visible throughout 
+# Sidebar Filters
+with st.sidebar:
+    st.markdown("## Filters")
+    
+    # Environment Selection
+    selected_environments = st.multiselect(
+        "Environments",
+        options=['DEV', 'TEST', 'UAT'],
+        default=['DEV'],
+        key="dashboard_environments"
+    )
+    
+    # Application Selection
+    if selected_environments:
+        all_load_names = get_all_load_names(session, selected_environments[0])
+        
+        selected_load_names = st.multiselect(
+            "Load Names",
+            options=all_load_names,
+            default=all_load_names if all_load_names else [],
+            key="dashboard_load_names"
+        )
+    else:
+        st.info("Select at least one environment")
+        selected_load_names = []
+    
+    st.markdown("---")
+    
+    # Refresh button
+    if st.button("🔄 Refresh", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    
+    st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+# Main Dashboard Content
+if selected_environments and selected_load_names:
+    with st.spinner("Loading dashboard data..."):
+        dashboard_data = get_dashboard_data(session, selected_environments, selected_load_names)
+    
+    if dashboard_data:
+        df_dashboard = pd.DataFrame(dashboard_data)
+        
+        # Summary Statistics
+        st.markdown("### Summary Statistics")
+        
+        total_tables = len(df_dashboard)
+        match_tables = len(df_dashboard[df_dashboard['Status'] == 'MATCH'])
+        warning_tables = len(df_dashboard[df_dashboard['Status'] == 'WARNING'])
+        mismatch_tables = len(df_dashboard[df_dashboard['Status'] == 'MISMATCH'])
+        no_data_tables = len(df_dashboard[df_dashboard['Status'] == 'NO DATA'])
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            st.metric("Total Tables", total_tables)
+        
+        with col2:
+            st.metric("Match", match_tables, 
+                     delta=f"{(match_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
+        
+        with col3:
+            st.metric("Warning", warning_tables,
+                     delta=f"{(warning_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
+        
+        with col4:
+            st.metric("Mismatch", mismatch_tables,
+                     delta=f"{(mismatch_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
+                     delta_color="inverse")
+        
+        with col5:
+            st.metric("No Data", no_data_tables,
+                     delta=f"{(no_data_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
+                     delta_color="inverse")
+        
+        st.markdown("---")
+        
+        # Table Filters
+        st.markdown("### Filter Results")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            status_filter = st.multiselect(
+                "Filter by Status",
+                options=['MATCH', 'WARNING', 'MISMATCH', 'NO DATA'],
+                default=['MATCH', 'WARNING', 'MISMATCH', 'NO DATA'],
+                key="status_filter"
+            )
+        
+        with col2:
+            env_filter = st.multiselect(
+                "Filter by Environment",
+                options=selected_environments,
+                default=selected_environments,
+                key="env_filter"
+            )
+        
+        with col3:
+            app_filter = st.multiselect(
+                "Filter by Load Name",
+                options=selected_load_names,
+                default=selected_load_names,
+                key="load_name_filter"
+            )
+        
+        # Apply filters
+        df_filtered = df_dashboard[
+            (df_dashboard['Status'].isin(status_filter)) &
+            (df_dashboard['Environment'].isin(env_filter)) &
+            (df_dashboard['Load Name'].isin(app_filter))
+        ]
+        
+        st.markdown("---")
+        st.markdown(f"### Validation Results ({len(df_filtered)} tables)")
+        
+        # Color coding function
+        def highlight_status(row):
+            if row['Status'] == 'MATCH':
+                return ['background-color: #d4edda'] * len(row)
+            elif row['Status'] == 'WARNING':
+                return ['background-color: #fff3cd'] * len(row)
+            elif row['Status'] == 'MISMATCH':
+                return ['background-color: #f8d7da'] * len(row)
+            elif row['Status'] == 'NO DATA':
+                return ['background-color: #e2e3e5'] * len(row)
+            return [''] * len(row)
+        
+        # Display filtered data
+        styled_df = df_filtered.style.apply(highlight_status, axis=1)
+        
+        st.dataframe(
+            styled_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Source Count": st.column_config.NumberColumn(format="%d"),
+                "Target Count": st.column_config.NumberColumn(format="%d"),
+                "Variance %": st.column_config.NumberColumn(format="%.2f%%"),
+            }
+        )
+        
+        # Download button
+        st.markdown("---")
+        csv = df_filtered.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download CSV",
+            data=csv,
+            file_name=f"validation_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+        
+        # Environment Breakdown
+        st.markdown("---")
+        st.markdown("### Environment Breakdown")
+        
+        for env in selected_environments:
+            with st.expander(f"{env} Environment", expanded=False):
+                env_data = df_filtered[df_filtered['Environment'] == env]
+                
+                if not env_data.empty:
+                    env_match = len(env_data[env_data['Status'] == 'MATCH'])
+                    env_total = len(env_data)
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric(f"{env} Total", env_total)
+                    with col2:
+                        st.metric(f"{env} Match", env_match)
+                    with col3:
+                        st.metric(f"{env} Issues", env_total - env_match)
+                    with col4:
+                        st.metric(f"{env} Success Rate", f"{(env_match/env_total*100):.1f}%")
+                    
+                    st.markdown("---")
+                    
+                    # Group by load name
+                    st.markdown(f"**Load Names in {env}:**")
+                    for load_name in env_data['Load Name'].unique():
+                        load_data = env_data[env_data['Load Name'] == load_name]
+                        load_match = len(load_data[load_data['Status'] == 'MATCH'])
+                        load_total = len(load_data)
+                        
+                        status_icon = "✅" if load_match == load_total else "⚠️" if load_match > 0 else "❌"
+                        st.write(f"{status_icon} {load_name}: {load_match}/{load_total} tables matching ({(load_match/load_total*100):.1f}%)")
+                else:
+                    st.info(f"No data for {env} environment with current filters")
+    
+    else:
+        st.warning("No data found for selected environments and load names")
+
+else:
+    st.info("Please select at least one environment and one load name from the sidebar")
+
+# Footer
+st.markdown("---")
+st.caption("Data Validation Dashboard | Powered by Snowflake")
