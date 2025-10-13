@@ -1,381 +1,1481 @@
+# ========================================
+# ENHANCED STREAMLIT PII DATA CLASSIFIER
+# With improved LLM model integration - FIXED
+# ========================================
+
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+import time
+import re
+import json
 from snowflake.snowpark.context import get_active_session
+from snowflake.snowpark.functions import col, lit
+import plotly.express as px
+import plotly.graph_objects as go
 
-# Get the current credentials
-session = get_active_session()
+# ========================================
+# SESSION INITIALIZATION
+# ========================================
 
-# Page configuration
-st.set_page_config(
-    page_title="Data Validation Dashboard",
-    page_icon="❄️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS for styling
-st.markdown("""
-<style>
-    .main-header {
-        color: #1f77b4;
-        padding: 10px 0;
-        border-bottom: 2px solid #e0e0e0;
-        margin-bottom: 20px;
-    }
-    .metric-card {
-        background-color: #f8f9fa;
-        padding: 15px;
-        border-radius: 8px;
-        border-left: 4px solid #1f77b4;
-        margin: 5px 0;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Helper Functions
-@st.cache_data
-def get_rowcount(_session, database, schema, table):
-    if database and schema and table:
-        try:
-            rowcount_result = _session.sql(f"SELECT COUNT(1) AS row_count FROM \"{database}\".\"{schema}\".\"{table}\"").collect()
-            return rowcount_result[0]['ROW_COUNT']
-        except Exception as e:
-            return 0
-    return 0
-
-def get_job_id(session, matillion_mapping_spec_name, environment='DEV'):
-    """Get job_id from JOB_MASTER_DPC table based on MATILLION_MAPPING_SPEC_NAME"""
+@st.cache_resource
+def get_session():
     try:
-        env_db_mapping = {
-            'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
-            'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
-            'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
-        }
-        
-        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
-        
-        query = f"""
-        SELECT job_id 
-        FROM {metadata_db}.GLOBAL.JOB_MASTER_DPC
-        WHERE BUSINESS_AREA = 'PROFISEED'
-        AND MATILLION_MAPPING_SPEC_NAME IN('{matillion_mapping_spec_name}')
-        LIMIT 1
+        return get_active_session()
+    except Exception as e:
+        st.error(f"Cannot connect to Snowflake: {str(e)}")
+        return None
+
+if 'session' not in st.session_state:
+    st.session_state.session = get_session()
+
+session = st.session_state.session
+
+if session is None:
+    st.error("Cannot connect to Snowflake. Please check your connection.")
+    st.stop()
+
+# ========================================
+# UTILITY FUNCTIONS
+# ========================================
+
+@st.cache_data
+def get_databases():
+    try:
+        database_result = session.sql("SHOW DATABASES").collect()
+        return [row['name'] for row in database_result 
+                if row['name'] not in ['INFORMATION_SCHEMA', 'SNOWFLAKE']]
+    except Exception as e:
+        st.error(f"Error fetching databases: {str(e)}")
+        return []
+
+def get_schemas(database):
+    if database:
+        try:
+            schema_result = session.sql(f"SHOW SCHEMAS IN DATABASE {database}").collect()
+            return [row['name'] for row in schema_result 
+                   if row['name'] != 'INFORMATION_SCHEMA']
+        except Exception as e:
+            st.error(f"Error fetching schemas: {str(e)}")
+            return []
+    return []
+
+def test_cortex_availability():
+    available_models = []
+    common_models = ['mistral-7b', 'llama3.1-8b', 'mixtral-8x7b', 'snowflake-arctic']
+    
+    for model in common_models:
+        try:
+            test_query = f"""
+            SELECT SNOWFLAKE.CORTEX.COMPLETE('{model}', 'test') as response
+            """
+            session.sql(test_query).collect()
+            available_models.append(model)
+        except Exception:
+            continue
+    
+    return len(available_models) > 0, available_models
+
+# ========================================
+# PII RULES
+# ========================================
+
+@st.cache_data(ttl=3600)
+def load_pii_rules():
+    try:
+        query = """
+        SELECT 
+            CASE 
+                WHEN restricted THEN 'RESTRICTED'
+                WHEN confidential THEN 'CONFIDENTIAL'
+                WHEN internal_use THEN 'INTERNAL_USE'
+                WHEN public THEN 'PUBLIC'
+            END as classification_level,
+            data_element as pii_type,
+            regex_patterns,
+            column_keywords,
+            compliance_requirements,
+            description,
+            examples
+        FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE
+        ORDER BY 
+            CASE 
+                WHEN restricted THEN 1
+                WHEN confidential THEN 2
+                WHEN internal_use THEN 3
+                WHEN public THEN 4
+            END,
+            data_element
         """
         
-        result = session.sql(query).collect()
-        return result[0]['JOB_ID'] if result else None
+        results_df = session.sql(query).to_pandas()
+        pii_rules = {}
+        
+        for _, row in results_df.iterrows():
+            classification = row['CLASSIFICATION_LEVEL']
+            pii_type = row['PII_TYPE']
+            
+            if classification not in pii_rules:
+                pii_rules[classification] = {}
+            
+            try:
+                patterns = json.loads(row['REGEX_PATTERNS']) if row['REGEX_PATTERNS'] else []
+                keywords = json.loads(row['COLUMN_KEYWORDS']) if row['COLUMN_KEYWORDS'] else []
+                compliance = json.loads(row['COMPLIANCE_REQUIREMENTS']) if row['COMPLIANCE_REQUIREMENTS'] else []
+            except:
+                patterns = []
+                keywords = []
+                compliance = []
+            
+            pii_rules[classification][pii_type] = {
+                'patterns': patterns,
+                'keywords': keywords,
+                'compliance': compliance,
+                'description': row['DESCRIPTION'] or '',
+                'examples': row['EXAMPLES'] or ''
+            }
+        
+        if pii_rules:
+            return pii_rules
+        else:
+            raise Exception("No rules found")
+            
+    except Exception as e:
+        st.warning(f"Could not load reference database. Using fallback rules.")
+        return get_fallback_pii_rules()
+
+def get_fallback_pii_rules():
+    return {
+        'RESTRICTED': {
+            'Social Security Number (SSN)': {
+                'patterns': [r'\b\d{3}-\d{2}-\d{4}\b', r'\b\d{9}\b'],
+                'keywords': ['ssn', 'social_security', 'tax_id', 'social_sec', 'ss_'],
+                'compliance': ['GDPR', 'CCPA'],
+                'description': 'Government-issued unique identifier',
+                'examples': '123-45-6789'
+            },
+            'Credit Card Number': {
+                'patterns': [r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b'],
+                'keywords': ['credit_card', 'cc_num', 'card_number', 'cvv'],
+                'compliance': ['PCI DSS'],
+                'description': 'Financial card numbers',
+                'examples': '4532-1234-5678-9012'
+            },
+            'Passport Number': {
+                'patterns': [r'\b[A-Z]{1,2}\d{6,9}\b'],
+                'keywords': ['passport', 'passport_num', 'passport_number'],
+                'compliance': ['GDPR'],
+                'description': 'Passport identification number',
+                'examples': 'A1234567'
+            }
+        },
+        'CONFIDENTIAL': {
+            'Date of Birth': {
+                'patterns': [r'\b\d{4}-\d{2}-\d{2}\b', r'\b\d{1,2}/\d{1,2}/\d{4}\b'],
+                'keywords': ['dob', 'birth_date', 'birthdate', 'date_of_birth'],
+                'compliance': ['GDPR', 'CCPA'],
+                'description': 'Date of birth',
+                'examples': '1985-03-15'
+            },
+            'Salary': {
+                'patterns': [r'\$[\d,]+\.?\d*', r'\b\d+\.\d{2}\b'],
+                'keywords': ['salary', 'wage', 'compensation', 'pay', 'income'],
+                'compliance': ['SOX'],
+                'description': 'Compensation information',
+                'examples': '$75,000.00'
+            },
+            'Medical Record': {
+                'patterns': [r'\bMR\d{6,10}\b'],
+                'keywords': ['medical_record', 'mrn', 'patient_id', 'health_record'],
+                'compliance': ['HIPAA'],
+                'description': 'Medical record numbers',
+                'examples': 'MR123456'
+            }
+        },
+        'INTERNAL_USE': {
+            'Phone Number': {
+                'patterns': [r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', r'\+\d{1,3}\s?\d{3}[-.]?\d{3}[-.]?\d{4}\b'],
+                'keywords': ['phone', 'tel', 'mobile', 'telephone', 'cell'],
+                'compliance': ['GDPR'],
+                'description': 'Phone numbers',
+                'examples': '555-123-4567'
+            },
+            'Email Address': {
+                'patterns': [r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'],
+                'keywords': ['email', 'mail', 'e_mail', 'email_address'],
+                'compliance': ['GDPR'],
+                'description': 'Email addresses',
+                'examples': 'user@company.com'
+            },
+            'Address': {
+                'patterns': [r'\d+\s+[A-Za-z\s]+\s+(Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd)'],
+                'keywords': ['address', 'street', 'location', 'residence'],
+                'compliance': ['GDPR'],
+                'description': 'Physical addresses',
+                'examples': '123 Main Street'
+            }
+        },
+        'PUBLIC': {
+            'Name': {
+                'patterns': [r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b'],
+                'keywords': ['name', 'first_name', 'last_name', 'full_name'],
+                'compliance': ['None'],
+                'description': 'Personal names',
+                'examples': 'John Smith'
+            }
+        }
+    }
+
+# ========================================
+# DATA SAMPLING
+# ========================================
+
+def get_table_columns(database, schema=None):
+    try:
+        schema_filter = f"AND TABLE_SCHEMA = '{schema}'" if schema else ""
+        
+        query = f"""
+        SELECT 
+            TABLE_SCHEMA,
+            TABLE_NAME,
+            COLUMN_NAME,
+            DATA_TYPE
+        FROM {database}.INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_CATALOG = '{database}' 
+        {schema_filter}
+        AND DATA_TYPE IN ('VARCHAR', 'STRING', 'TEXT', 'CHAR', 'DATE', 'TIMESTAMP_NTZ', 'NUMBER')
+        AND TABLE_SCHEMA != 'INFORMATION_SCHEMA'
+        ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
+        """
+        
+        return session.sql(query).to_pandas()
+        
+    except Exception as e:
+        st.error(f"Error fetching columns: {str(e)}")
+        return pd.DataFrame()
+
+def batch_sample_columns(database, columns_df, sample_size):
+    samples_dict = {}
+    tables_groups = columns_df.groupby(['TABLE_SCHEMA', 'TABLE_NAME'])
+    
+    for idx, ((schema, table), group) in enumerate(tables_groups):
+        try:
+            full_table = f"{database}.{schema}.{table}"
+            columns = group['COLUMN_NAME'].tolist()
+            
+            if len(columns) <= 20:
+                col_selects = ", ".join([f'"{col}"' for col in columns])
+                query = f"""
+                SELECT {col_selects}
+                FROM {full_table}
+                LIMIT {min(sample_size, 15)}
+                """
+                
+                result_df = session.sql(query).to_pandas()
+                
+                for col in columns:
+                    key = f"{schema}.{table}.{col}"
+                    if col in result_df.columns:
+                        samples = result_df[col].dropna().astype(str).tolist()
+                        samples_dict[key] = samples
+            else:
+                for i in range(0, len(columns), 20):
+                    batch_cols = columns[i:i+20]
+                    col_selects = ", ".join([f'"{col}"' for col in batch_cols])
+                    query = f"""
+                    SELECT {col_selects}
+                    FROM {full_table}
+                    LIMIT {min(sample_size, 15)}
+                    """
+                    
+                    result_df = session.sql(query).to_pandas()
+                    
+                    for col in batch_cols:
+                        key = f"{schema}.{table}.{col}"
+                        if col in result_df.columns:
+                            samples = result_df[col].dropna().astype(str).tolist()
+                            samples_dict[key] = samples
+                
+        except Exception:
+            continue
+    
+    return samples_dict
+
+# ========================================
+# PATTERN-BASED DETECTION (FIXED)
+# ========================================
+
+def pattern_based_classification(column_name, sample_data, pii_rules):
+    column_name_lower = column_name.lower()
+    best_match = None
+    max_confidence = 0
+    
+    for classification_level, pii_types in pii_rules.items():
+        for pii_type, rule in pii_types.items():
+            confidence_score = 0
+            keyword_match = False
+            pattern_match_count = 0
+            total_samples = 0
+            match_ratio = 0.0  # FIXED: Initialize here
+            
+            # Keyword matching (0-40 points)
+            keyword_score = 0
+            for keyword in rule['keywords']:
+                keyword_lower = keyword.lower()
+                if keyword_lower in column_name_lower:
+                    if (column_name_lower == keyword_lower or 
+                        f"_{keyword_lower}_" in column_name_lower or 
+                        column_name_lower.startswith(keyword_lower + "_") or 
+                        column_name_lower.endswith("_" + keyword_lower)):
+                        keyword_match = True
+                        keyword_score = 40
+                    else:
+                        keyword_match = True
+                        keyword_score = 30
+                    break
+            
+            confidence_score += keyword_score
+            
+            # Pattern matching (0-60 points)
+            if sample_data and len(sample_data) > 0:
+                total_samples = min(len(sample_data), 10)
+                
+                for pattern in rule['patterns']:
+                    if pattern == '.*':
+                        if keyword_match and keyword_score >= 30:
+                            pattern_match_count = total_samples // 3
+                        break
+                    else:
+                        for value in sample_data[:total_samples]:
+                            try:
+                                value_str = str(value).strip()
+                                if value_str and re.search(pattern, value_str, re.IGNORECASE):
+                                    pattern_match_count += 1
+                            except:
+                                continue
+                
+                # FIXED: Calculate match_ratio inside the sample_data block
+                if total_samples > 0:
+                    match_ratio = pattern_match_count / total_samples
+                    
+                    if pattern_match_count > 0:
+                        if match_ratio >= 0.9:
+                            confidence_score += 60
+                        elif match_ratio >= 0.7:
+                            confidence_score += 50
+                        elif match_ratio >= 0.5:
+                            confidence_score += 40
+                        elif match_ratio >= 0.3:
+                            confidence_score += 30
+                        else:
+                            confidence_score += 20
+            
+            # Store best match
+            if confidence_score > max_confidence and confidence_score >= 40:
+                max_confidence = confidence_score
+                best_match = {
+                    'pii_type': pii_type,
+                    'classification_level': classification_level,
+                    'confidence_score': min(confidence_score, 100),
+                    'compliance_tags': rule['compliance'],
+                    'description': rule.get('description', ''),
+                    'detection_details': {
+                        'keyword_matched': keyword_match,
+                        'pattern_matches': pattern_match_count,
+                        'samples_checked': total_samples,
+                        'match_ratio': round(match_ratio * 100, 1)
+                    }
+                }
+    
+    return best_match
+
+# ========================================
+# MODEL-BASED DETECTION
+# ========================================
+
+def model_based_classification(column_name, sample_data, pii_rules, model='mixtral-8x7b'):
+    if not sample_data or len(sample_data) == 0:
+        return None
+    
+    samples = [str(s)[:100] for s in sample_data[:12] if s]
+    
+    pii_types_context = []
+    for classification_level, types in pii_rules.items():
+        for pii_type, rule in types.items():
+            pii_types_context.append({
+                'type': pii_type,
+                'level': classification_level,
+                'keywords': rule['keywords'][:3],
+                'description': rule['description']
+            })
+    
+    prompt = f"""You are a data privacy expert. Analyze if this column contains PII.
+
+COLUMN: {column_name}
+SAMPLES: {json.dumps(samples[:10], indent=2)}
+
+PII TYPES TO CONSIDER:
+{json.dumps(pii_types_context[:12], indent=2)}
+
+ANALYZE:
+1. Do values match PII patterns?
+2. Does column name indicate PII?
+3. Are values consistent with a PII type?
+4. Could this be non-PII?
+
+Respond ONLY with valid JSON (no markdown):
+{{
+  "is_pii": true,
+  "detected_type": "Social Security Number (SSN)",
+  "classification_level": "RESTRICTED",
+  "confidence": 85,
+  "reasoning": "Values match SSN pattern XXX-XX-XXXX"
+}}"""
+
+    try:
+        query = f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            '{model}',
+            '{prompt.replace("'", "''")}'
+        ) as response
+        """
+        
+        result = session.sql(query).collect()[0]['RESPONSE']
+        
+        result_clean = result.strip()
+        if result_clean.startswith('```'):
+            result_clean = re.sub(r'^```(?:json)?\n?', '', result_clean)
+            result_clean = re.sub(r'\n?```$', '', result_clean)
+        
+        analysis = json.loads(result_clean)
+        
+        if analysis.get('is_pii'):
+            return {
+                'pii_type': analysis.get('detected_type'),
+                'classification_level': analysis.get('classification_level'),
+                'confidence_score': analysis.get('confidence', 0),
+                'model_reasoning': analysis.get('reasoning', ''),
+                'detection_method': 'Model'
+            }
+        
+        return None
         
     except Exception as e:
         return None
 
-def get_all_load_names(session, environment='DEV'):
-    """Get all unique load names from metadata"""
-    try:
-        env_db_mapping = {
-            'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
-            'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
-            'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
-        }
-        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
-        
-        query = f"""
-        SELECT DISTINCT LOAD_NAME
-        FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
-        WHERE ACTIVE_IND = 'Y' AND LOAD_TYPE = 'LOD_TO_LOD'
-        ORDER BY LOAD_NAME
-        """
-        result = session.sql(query).collect()
-        return [row['LOAD_NAME'] for row in result]
-    except Exception as e:
-        st.error(f"Error fetching load names: {str(e)}")
-        return []
+# ========================================
+# HYBRID DETECTION
+# ========================================
 
-def get_dashboard_data(session, environments, load_names):
-    """Get dashboard data for selected environments and load names"""
-    dashboard_data = []
+def hybrid_classification(column_name, sample_data, pii_rules, model='mixtral-8x7b'):
+    # Phase 1: Pattern-based quick scan
+    pattern_result = pattern_based_classification(column_name, sample_data, pii_rules)
     
-    env_db_mapping = {
-        'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
-        'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
-        'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
+    # High confidence from patterns - trust it
+    if pattern_result and pattern_result['confidence_score'] >= 80:
+        pattern_result['detection_method'] = 'Pattern_High'
+        return pattern_result
+    
+    # Phase 2: Model validation for medium confidence
+    if pattern_result and 50 <= pattern_result['confidence_score'] < 80:
+        model_result = model_based_classification(column_name, sample_data, pii_rules, model)
+        
+        if model_result:
+            if model_result['pii_type'] == pattern_result['pii_type']:
+                # Agreement - boost confidence
+                pattern_result['confidence_score'] = min(95, 
+                    int((pattern_result['confidence_score'] + model_result['confidence_score']) / 2 + 10))
+                pattern_result['detection_method'] = 'Hybrid_Agreement'
+                pattern_result['model_reasoning'] = model_result.get('model_reasoning', '')
+                return pattern_result
+            else:
+                # Disagreement - prefer model if higher confidence
+                if model_result['confidence_score'] > pattern_result['confidence_score']:
+                    model_result['detection_method'] = 'Model_Override'
+                    model_result['compliance_tags'] = pattern_result.get('compliance_tags', [])
+                    return model_result
+    
+    # Phase 3: Model-only for low pattern confidence
+    if not pattern_result or pattern_result['confidence_score'] < 50:
+        model_result = model_based_classification(column_name, sample_data, pii_rules, model)
+        
+        if model_result and model_result['confidence_score'] >= 60:
+            model_result['detection_method'] = 'Model_Only'
+            return model_result
+    
+    return pattern_result
+
+# ========================================
+# COMPARISON MODE
+# ========================================
+
+def compare_detection_methods(column_name, sample_data, pii_rules, model='mixtral-8x7b'):
+    results = {}
+    
+    # Pattern-only
+    pattern_result = pattern_based_classification(column_name, sample_data, pii_rules)
+    results['pattern'] = pattern_result
+    
+    # Model-only
+    model_result = model_based_classification(column_name, sample_data, pii_rules, model)
+    results['model'] = model_result
+    
+    # Hybrid
+    hybrid_result = hybrid_classification(column_name, sample_data, pii_rules, model)
+    results['hybrid'] = hybrid_result
+    
+    # Comparison
+    results['comparison'] = {
+        'pattern_detected': pattern_result is not None,
+        'model_detected': model_result is not None,
+        'hybrid_detected': hybrid_result is not None,
+        'agreement': (pattern_result and model_result and 
+                     pattern_result.get('pii_type') == model_result.get('pii_type')),
+        'pattern_confidence': pattern_result['confidence_score'] if pattern_result else 0,
+        'model_confidence': model_result['confidence_score'] if model_result else 0,
+        'hybrid_confidence': hybrid_result['confidence_score'] if hybrid_result else 0
     }
     
-    for environment in environments:
-        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
+    return results
+
+# ========================================
+# MAIN SCAN FUNCTION
+# ========================================
+
+def run_pii_scan(database, schema, sample_size, confidence_threshold, 
+                 detection_mode, model=None, enable_comparison=False):
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        # Step 1: Discover columns
+        status_text.text("Discovering columns...")
+        columns_df = get_table_columns(database, schema)
         
-        for load_name in load_names:
-            try:
-                query = f"""
-                SELECT DISTINCT
-                    APPLICATION_NAME,
-                    LOAD_NAME,
-                    SOURCE_DATABASE_NAME,
-                    SOURCE_SCHEMA_NAME,
-                    SOURCE_TABLE_NAME,
-                    TARGET_DATABASE_NAME,
-                    TARGET_SCHEMA_NAME,
-                    TARGET_TABLE_NAME,
-                    ORCHESTRATION_JOB_NAME,
-                    MATILLION_MAPPING_SPEC_NAME
-                FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
-                WHERE LOAD_NAME = '{load_name}'
-                AND ACTIVE_IND = 'Y' 
-                AND LOAD_TYPE = 'LOD_TO_LOD'
-                ORDER BY SOURCE_TABLE_NAME
-                """
+        if columns_df.empty:
+            st.warning("No tables found.")
+            return pd.DataFrame(), []
+        
+        st.info(f"Found {len(columns_df)} columns to analyze")
+        progress_bar.progress(10)
+        
+        # Step 2: Load rules
+        status_text.text("Loading PII rules...")
+        pii_rules = load_pii_rules()
+        progress_bar.progress(20)
+        
+        # Step 3: Sample data
+        status_text.text("Sampling data...")
+        samples_dict = batch_sample_columns(database, columns_df, sample_size)
+        progress_bar.progress(50)
+        
+        # Step 4: Classify
+        results = []
+        comparison_results = []
+        total_columns = len(columns_df)
+        chunk_size = max(1, total_columns // 20)
+        
+        for idx, row in columns_df.iterrows():
+            if idx % chunk_size == 0:
+                progress = 50 + int((idx / total_columns) * 45)
+                progress_bar.progress(progress)
+                status_text.text(f"Analyzing... {idx}/{total_columns}")
+            
+            key = f"{row['TABLE_SCHEMA']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}"
+            sample_data = samples_dict.get(key, [])
+            
+            # Comparison mode
+            if enable_comparison and idx < 10:  # Only compare first 10
+                comp = compare_detection_methods(
+                    row['COLUMN_NAME'], sample_data, pii_rules, model
+                )
+                comp['column'] = row['COLUMN_NAME']
+                comp['table'] = row['TABLE_NAME']
+                comparison_results.append(comp)
+            
+            # Classification
+            if detection_mode == 'pattern':
+                classification = pattern_based_classification(
+                    row['COLUMN_NAME'], sample_data, pii_rules
+                )
+            elif detection_mode == 'model':
+                classification = model_based_classification(
+                    row['COLUMN_NAME'], sample_data, pii_rules, model
+                )
+            elif detection_mode == 'hybrid':
+                classification = hybrid_classification(
+                    row['COLUMN_NAME'], sample_data, pii_rules, model
+                )
+            
+            if classification and classification['confidence_score'] >= confidence_threshold:
+                sample_pattern = sample_data[0][:30] + "..." if sample_data else ""
                 
-                result = session.sql(query).collect()
-                
-                for row in result:
-                    # Get job_id
-                    matillion_spec = row['MATILLION_MAPPING_SPEC_NAME']
-                    job_id = get_job_id(session, matillion_spec, environment) if matillion_spec else None
-                    
-                    # Get row counts
-                    source_count = get_rowcount(session, 
-                                              row['SOURCE_DATABASE_NAME'],
-                                              row['SOURCE_SCHEMA_NAME'],
-                                              row['SOURCE_TABLE_NAME'])
-                    
-                    target_count = get_rowcount(session,
-                                              row['TARGET_DATABASE_NAME'],
-                                              row['TARGET_SCHEMA_NAME'],
-                                              row['TARGET_TABLE_NAME'])
-                    
-                    # Calculate variance
-                    if source_count > 0:
-                        variance = abs((source_count - target_count) / source_count * 100)
-                    else:
-                        variance = 100 if target_count > 0 else 0
-                    
-                    # Determine status
-                    if target_count == 0:
-                        status = "NO DATA"
-                    elif variance <= 1:
-                        status = "MATCH"
-                    elif variance <= 5:
-                        status = "WARNING"
-                    else:
-                        status = "MISMATCH"
-                    
-                    dashboard_data.append({
-                        'Environment': environment,
-                        'Load Name': row['LOAD_NAME'],
-                        'Application': row['APPLICATION_NAME'],
-                        'Job ID': job_id or 'N/A',
-                        'Source Table': row['SOURCE_TABLE_NAME'],
-                        'Target Table': row['TARGET_TABLE_NAME'],
-                        'Source Count': source_count,
-                        'Target Count': target_count,
-                        'Variance %': round(variance, 2),
-                        'Status': status,
-                        'Job Name': row['ORCHESTRATION_JOB_NAME']
-                    })
-                    
-            except Exception as e:
-                st.error(f"Error fetching data for {load_name} in {environment}: {str(e)}")
-    
-    return dashboard_data
+                results.append({
+                    'DATABASE_NAME': database,
+                    'SCHEMA_NAME': row['TABLE_SCHEMA'],
+                    'TABLE_NAME': row['TABLE_NAME'],
+                    'COLUMN_NAME': row['COLUMN_NAME'],
+                    'DATA_TYPE': row['DATA_TYPE'],
+                    'PII_TYPE': classification['pii_type'],
+                    'CLASSIFICATION_LEVEL': classification['classification_level'],
+                    'CONFIDENCE_SCORE': round(classification['confidence_score'], 1),
+                    'DETECTION_METHOD': classification.get('detection_method', detection_mode),
+                    'SAMPLE_PATTERN': sample_pattern,
+                    'COMPLIANCE_TAGS': ', '.join(classification.get('compliance_tags', [])),
+                    'MODEL_REASONING': classification.get('model_reasoning', '')
+                })
+        
+        progress_bar.progress(100)
+        status_text.text(f"Scan completed! Found {len(results)} PII columns.")
+        
+        return pd.DataFrame(results), comparison_results
+        
+    except Exception as e:
+        st.error(f"Error during scan: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
+        return pd.DataFrame(), []
 
-# Header
-st.markdown('<h1 class="main-header">Data Validation Dashboard</h1>', unsafe_allow_html=True)
-st.markdown("Multi-Environment Migration Monitoring")
-st.markdown("---")
+# ========================================
+# UI COMPONENTS
+# ========================================
 
-# Sidebar Filters
-with st.sidebar:
-    st.markdown("## Filters")
-    
-    # Environment Selection
-    selected_environments = st.multiselect(
-        "Environments",
-        options=['DEV', 'TEST', 'UAT'],
-        default=['DEV'],
-        key="dashboard_environments"
+def render_header():
+    st.set_page_config(
+        layout="wide", 
+        page_title="Enhanced PII Classifier", 
+        page_icon="🛡️"
     )
     
-    # Application Selection
-    if selected_environments:
-        all_load_names = get_all_load_names(session, selected_environments[0])
-        
-        selected_load_names = st.multiselect(
-            "Load Names",
-            options=all_load_names,
-            default=all_load_names if all_load_names else [],
-            key="dashboard_load_names"
-        )
-    else:
-        st.info("Select at least one environment")
-        selected_load_names = []
-    
-    st.markdown("---")
-    
-    # Refresh button
-    if st.button("🔄 Refresh", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-    
-    st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    st.markdown("""
+        <div style="padding: 1rem; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); 
+                    border-radius: 10px; margin-bottom: 1rem;">
+            <h1 style="color: white; margin: 0;">🛡️ Enhanced PII Data Classifier</h1>
+            <p style="color: #f0f0f0; margin: 0.5rem 0 0 0;">
+                Pattern + AI Model Detection
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
 
-# Main Dashboard Content
-if selected_environments and selected_load_names:
-    with st.spinner("Loading dashboard data..."):
-        dashboard_data = get_dashboard_data(session, selected_environments, selected_load_names)
+def render_scanner():
+    st.subheader("🔍 PII Scanner Configuration")
     
-    if dashboard_data:
-        df_dashboard = pd.DataFrame(dashboard_data)
-        
-        # Summary Statistics
-        st.markdown("### Summary Statistics")
-        
-        total_tables = len(df_dashboard)
-        match_tables = len(df_dashboard[df_dashboard['Status'] == 'MATCH'])
-        warning_tables = len(df_dashboard[df_dashboard['Status'] == 'WARNING'])
-        mismatch_tables = len(df_dashboard[df_dashboard['Status'] == 'MISMATCH'])
-        no_data_tables = len(df_dashboard[df_dashboard['Status'] == 'NO DATA'])
-        
-        col1, col2, col3, col4, col5 = st.columns(5)
-        
-        with col1:
-            st.metric("Total Tables", total_tables)
-        
-        with col2:
-            st.metric("Match", match_tables, 
-                     delta=f"{(match_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
-        
-        with col3:
-            st.metric("Warning", warning_tables,
-                     delta=f"{(warning_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
-        
-        with col4:
-            st.metric("Mismatch", mismatch_tables,
-                     delta=f"{(mismatch_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
-                     delta_color="inverse")
-        
-        with col5:
-            st.metric("No Data", no_data_tables,
-                     delta=f"{(no_data_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
-                     delta_color="inverse")
-        
-        st.markdown("---")
-        
-        # Table Filters
-        st.markdown("### Filter Results")
+    # Database selection
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        databases = get_databases()
+        selected_database = st.selectbox(
+            "Select Database",
+            options=databases,
+            index=None,
+            placeholder="Choose a database"
+        )
+    
+    with col2:
+        if selected_database:
+            schemas = get_schemas(selected_database)
+            selected_schema = st.selectbox(
+                "Select Schema (Optional)",
+                options=[""] + schemas,
+                index=0
+            )
+            selected_schema = selected_schema if selected_schema else None
+        else:
+            selected_schema = None
+            st.selectbox("Select Schema (Optional)", options=[], placeholder="Select database first")
+    
+    # Scan options
+    with st.expander("⚙️ Detection Configuration", expanded=True):
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            status_filter = st.multiselect(
-                "Filter by Status",
-                options=['MATCH', 'WARNING', 'MISMATCH', 'NO DATA'],
-                default=['MATCH', 'WARNING', 'MISMATCH', 'NO DATA'],
-                key="status_filter"
+            detection_mode = st.selectbox(
+                "Detection Strategy",
+                options=["pattern", "hybrid", "model"],
+                index=1,
+                help="Pattern: Fast | Hybrid: Balanced (Recommended) | Model: Most Accurate"
             )
         
         with col2:
-            env_filter = st.multiselect(
-                "Filter by Environment",
-                options=selected_environments,
-                default=selected_environments,
-                key="env_filter"
+            sample_size = st.number_input(
+                "Sample Size", 
+                min_value=5, 
+                max_value=50, 
+                value=15
             )
         
         with col3:
-            app_filter = st.multiselect(
-                "Filter by Load Name",
-                options=selected_load_names,
-                default=selected_load_names,
-                key="load_name_filter"
+            confidence_threshold = st.slider(
+                "Confidence Threshold (%)", 
+                min_value=50, 
+                max_value=100, 
+                value=70
             )
         
-        # Apply filters
-        df_filtered = df_dashboard[
-            (df_dashboard['Status'].isin(status_filter)) &
-            (df_dashboard['Environment'].isin(env_filter)) &
-            (df_dashboard['Load Name'].isin(app_filter))
-        ]
+        # Model selection
+        selected_model = None
+        if detection_mode in ['hybrid', 'model']:
+            cortex_available, available_models = test_cortex_availability()
+            
+            if cortex_available:
+                st.success(f"✅ Cortex AI available ({len(available_models)} models)")
+                recommended = "mixtral-8x7b" if "mixtral-8x7b" in available_models else available_models[0]
+                model_index = available_models.index(recommended) if recommended in available_models else 0
+                selected_model = st.selectbox(
+                    "AI Model",
+                    options=available_models,
+                    index=model_index,
+                    help="Mixtral-8x7b recommended for best accuracy"
+                )
+            else:
+                st.warning("⚠️ Cortex unavailable - switching to pattern mode")
+                detection_mode = 'pattern'
         
-        st.markdown("---")
-        st.markdown(f"### Validation Results ({len(df_filtered)} tables)")
-        
-        # Color coding function
-        def highlight_status(row):
-            if row['Status'] == 'MATCH':
-                return ['background-color: #d4edda'] * len(row)
-            elif row['Status'] == 'WARNING':
-                return ['background-color: #fff3cd'] * len(row)
-            elif row['Status'] == 'MISMATCH':
-                return ['background-color: #f8d7da'] * len(row)
-            elif row['Status'] == 'NO DATA':
-                return ['background-color: #e2e3e5'] * len(row)
-            return [''] * len(row)
-        
-        # Display filtered data
-        styled_df = df_filtered.style.apply(highlight_status, axis=1)
-        
-        st.dataframe(
-            styled_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Source Count": st.column_config.NumberColumn(format="%d"),
-                "Target Count": st.column_config.NumberColumn(format="%d"),
-                "Variance %": st.column_config.NumberColumn(format="%.2f%%"),
-            }
+        # Comparison mode
+        enable_comparison = st.checkbox(
+            "Enable Method Comparison (first 10 columns)",
+            value=False,
+            help="Compare Pattern vs Model vs Hybrid side-by-side"
         )
-        
-        # Download button
+    
+    # Info boxes
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.info("⚡ **Pattern**: Fast, rule-based")
+    with col2:
+        st.info("🎯 **Hybrid**: Smart combination")
+    with col3:
+        st.info("🤖 **Model**: AI-powered")
+    
+    # Scan button
+    if st.button("🚀 Start PII Scan", type="primary", disabled=not selected_database):
+        if selected_database:
+            scan_results, comparison_data = run_pii_scan(
+                selected_database,
+                selected_schema,
+                sample_size,
+                confidence_threshold,
+                detection_mode,
+                selected_model,
+                enable_comparison
+            )
+            
+            if not scan_results.empty:
+                st.session_state['scan_results'] = scan_results
+                st.session_state['comparison_data'] = comparison_data
+                st.success(f"✅ Found {len(scan_results)} PII columns")
+                st.rerun()
+            else:
+                st.info("No PII detected")
+
+def render_results():
+    if 'scan_results' not in st.session_state or st.session_state.scan_results.empty:
+        st.info("No scan results. Run a scan first.")
+        return
+    
+    df = st.session_state.scan_results
+    
+    st.subheader("📊 PII Classification Results")
+    
+    # Summary metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    classification_counts = df['CLASSIFICATION_LEVEL'].value_counts()
+    
+    with col1:
+        st.metric("🔴 Restricted", classification_counts.get('RESTRICTED', 0))
+    with col2:
+        st.metric("🟡 Confidential", classification_counts.get('CONFIDENTIAL', 0))
+    with col3:
+        st.metric("🟢 Internal", classification_counts.get('INTERNAL_USE', 0))
+    with col4:
+        st.metric("🔵 Public", classification_counts.get('PUBLIC', 0))
+    with col5:
+        st.metric("📋 Total", len(df))
+    
+    # Detection method breakdown
+    if 'DETECTION_METHOD' in df.columns:
         st.markdown("---")
-        csv = df_filtered.to_csv(index=False).encode('utf-8')
+        st.subheader("Detection Method Breakdown")
+        method_counts = df['DETECTION_METHOD'].value_counts()
+        
+        col1, col2, col3 = st.columns(3)
+        for idx, (method, count) in enumerate(method_counts.items()):
+            with [col1, col2, col3][idx % 3]:
+                st.metric(method, count)
+    
+    # Filters
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    with col1:
+        classification_filter = st.multiselect(
+            "Filter by Classification",
+            options=df['CLASSIFICATION_LEVEL'].unique(),
+            default=df['CLASSIFICATION_LEVEL'].unique()
+        )
+    
+    with col2:
+        search_term = st.text_input("🔎 Search columns...")
+    
+    # Apply filters
+    filtered_df = df[df['CLASSIFICATION_LEVEL'].isin(classification_filter)]
+    
+    if search_term:
+        mask = (
+            filtered_df['TABLE_NAME'].str.contains(search_term, case=False, na=False) |
+            filtered_df['COLUMN_NAME'].str.contains(search_term, case=False, na=False) |
+            filtered_df['PII_TYPE'].str.contains(search_term, case=False, na=False)
+        )
+        filtered_df = filtered_df[mask]
+    
+    st.write(f"**Showing {len(filtered_df)} of {len(df)} results**")
+    
+    # Results table
+    if not filtered_df.empty:
+        def style_classification(val):
+            colors = {
+                'RESTRICTED': 'background-color: #fee2e2; color: #991b1b',
+                'CONFIDENTIAL': 'background-color: #fef3c7; color: #92400e',
+                'INTERNAL_USE': 'background-color: #d1fae5; color: #065f46',
+                'PUBLIC': 'background-color: #dbeafe; color: #1e40af'
+            }
+            return colors.get(val, '')
+        
+        display_cols = ['SCHEMA_NAME', 'TABLE_NAME', 'COLUMN_NAME', 'PII_TYPE', 
+                       'CLASSIFICATION_LEVEL', 'CONFIDENCE_SCORE', 'DETECTION_METHOD']
+        
+        styled_df = filtered_df[display_cols].style.map(
+            style_classification, subset=['CLASSIFICATION_LEVEL']
+        )
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        
+        # Model reasoning viewer
+        if 'MODEL_REASONING' in filtered_df.columns:
+            with st.expander("View AI Model Reasoning"):
+                reasoning_df = filtered_df[filtered_df['MODEL_REASONING'] != ''][
+                    ['COLUMN_NAME', 'PII_TYPE', 'MODEL_REASONING']
+                ]
+                if not reasoning_df.empty:
+                    for _, row in reasoning_df.iterrows():
+                        st.markdown(f"**{row['COLUMN_NAME']}** ({row['PII_TYPE']})")
+                        st.info(row['MODEL_REASONING'])
+                else:
+                    st.write("No AI reasoning available")
+        
+        # Export
+        st.markdown("---")
+        csv_data = filtered_df.to_csv(index=False)
         st.download_button(
-            label="Download CSV",
-            data=csv,
-            file_name=f"validation_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            "📥 Download Results CSV",
+            data=csv_data,
+            file_name=f"pii_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv"
         )
-        
-        # Environment Breakdown
-        st.markdown("---")
-        st.markdown("### Environment Breakdown")
-        
-        for env in selected_environments:
-            with st.expander(f"{env} Environment", expanded=False):
-                env_data = df_filtered[df_filtered['Environment'] == env]
-                
-                if not env_data.empty:
-                    env_match = len(env_data[env_data['Status'] == 'MATCH'])
-                    env_total = len(env_data)
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric(f"{env} Total", env_total)
-                    with col2:
-                        st.metric(f"{env} Match", env_match)
-                    with col3:
-                        st.metric(f"{env} Issues", env_total - env_match)
-                    with col4:
-                        st.metric(f"{env} Success Rate", f"{(env_match/env_total*100):.1f}%")
-                    
-                    st.markdown("---")
-                    
-                    # Group by load name
-                    st.markdown(f"**Load Names in {env}:**")
-                    for load_name in env_data['Load Name'].unique():
-                        load_data = env_data[env_data['Load Name'] == load_name]
-                        load_match = len(load_data[load_data['Status'] == 'MATCH'])
-                        load_total = len(load_data)
-                        
-                        status_icon = "✅" if load_match == load_total else "⚠️" if load_match > 0 else "❌"
-                        st.write(f"{status_icon} {load_name}: {load_match}/{load_total} tables matching ({(load_match/load_total*100):.1f}%)")
-                else:
-                    st.info(f"No data for {env} environment with current filters")
+
+def render_analytics():
+    if 'scan_results' not in st.session_state or st.session_state.scan_results.empty:
+        st.info("No data to analyze. Run a scan first.")
+        return
     
-    else:
-        st.warning("No data found for selected environments and load names")
+    df = st.session_state.scan_results
+    
+    st.subheader("📈 PII Analytics Dashboard")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        fig_pie = px.pie(
+            values=df['CLASSIFICATION_LEVEL'].value_counts().values,
+            names=df['CLASSIFICATION_LEVEL'].value_counts().index,
+            title="Classification Distribution",
+            color_discrete_map={
+                'RESTRICTED': '#ef4444',
+                'CONFIDENTIAL': '#f59e0b',
+                'INTERNAL_USE': '#10b981',
+                'PUBLIC': '#3b82f6'
+            }
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+    
+    with col2:
+        pii_counts = df['PII_TYPE'].value_counts().head(10)
+        fig_bar = px.bar(
+            x=pii_counts.values,
+            y=pii_counts.index,
+            orientation='h',
+            title="Top 10 PII Types"
+        )
+        fig_bar.update_layout(yaxis={'categoryorder': 'total ascending'})
+        st.plotly_chart(fig_bar, use_container_width=True)
+    
+    st.markdown("---")
+    fig_hist = px.histogram(
+        df,
+        x='CONFIDENCE_SCORE',
+        nbins=20,
+        title="Confidence Score Distribution"
+    )
+    st.plotly_chart(fig_hist, use_container_width=True)
+    
+    if 'DETECTION_METHOD' in df.columns:
+        st.markdown("---")
+        st.subheader("Detection Method Performance")
+        
+        method_stats = df.groupby('DETECTION_METHOD').agg({
+            'CONFIDENCE_SCORE': ['mean', 'min', 'max', 'count']
+        }).round(1)
+        
+        method_stats.columns = ['Avg Confidence', 'Min Confidence', 'Max Confidence', 'Count']
+        st.dataframe(method_stats, use_container_width=True)
 
-else:
-    st.info("Please select at least one environment and one load name from the sidebar")
+def render_comparison():
+    if 'comparison_data' not in st.session_state or not st.session_state.comparison_data:
+        st.info("No comparison data. Enable comparison mode in scanner.")
+        return
+    
+    st.subheader("🔬 Detection Method Comparison")
+    
+    comparison_data = st.session_state.comparison_data
+    
+    for comp in comparison_data:
+        with st.expander(f"📊 {comp['table']}.{comp['column']}"):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.markdown("**⚡ Pattern**")
+                if comp['pattern']:
+                    st.success(f"✅ {comp['pattern']['pii_type']}")
+                    st.metric("Confidence", f"{comp['pattern']['confidence_score']}%")
+                else:
+                    st.warning("❌ Not detected")
+            
+            with col2:
+                st.markdown("**🤖 Model**")
+                if comp['model']:
+                    st.success(f"✅ {comp['model']['pii_type']}")
+                    st.metric("Confidence", f"{comp['model']['confidence_score']}%")
+                    if 'model_reasoning' in comp['model']:
+                        st.info(comp['model']['model_reasoning'][:150])
+                else:
+                    st.warning("❌ Not detected")
+            
+            with col3:
+                st.markdown("**🎯 Hybrid**")
+                if comp['hybrid']:
+                    st.success(f"✅ {comp['hybrid']['pii_type']}")
+                    st.metric("Confidence", f"{comp['hybrid']['confidence_score']}%")
+                else:
+                    st.warning("❌ Not detected")
 
-# Footer
-st.markdown("---")
-st.caption("Data Validation Dashboard | Powered by Snowflake")
+def render_reference():
+    st.subheader("📚 PII Classification Reference")
+    
+    try:
+        pii_rules = load_pii_rules()
+        
+        reference_data = []
+        for classification_level, pii_types in pii_rules.items():
+            for pii_type, rule in pii_types.items():
+                reference_data.append({
+                    'Classification': classification_level,
+                    'PII Type': pii_type,
+                    'Description': rule['description'],
+                    'Keywords': ', '.join(rule['keywords'][:5]),
+                    'Patterns': len(rule['patterns']),
+                    'Compliance': ', '.join(rule['compliance'])
+                })
+        
+        ref_df = pd.DataFrame(reference_data)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🔴 Restricted", len(ref_df[ref_df['Classification'] == 'RESTRICTED']))
+        with col2:
+            st.metric("🟡 Confidential", len(ref_df[ref_df['Classification'] == 'CONFIDENTIAL']))
+        with col3:
+            st.metric("🟢 Internal", len(ref_df[ref_df['Classification'] == 'INTERNAL_USE']))
+        with col4:
+            st.metric("🔵 Public", len(ref_df[ref_df['Classification'] == 'PUBLIC']))
+        
+        st.markdown("---")
+        st.dataframe(ref_df, use_container_width=True, hide_index=True)
+        
+    except Exception as e:
+        st.error(f"Error loading reference: {str(e)}")
+
+# ========================================
+# MASKING POLICY FUNCTIONS
+# ========================================
+
+def get_masking_function(pii_type, classification_level):
+    """Generate masking SQL based on PII type and classification."""
+    
+    masking_strategies = {
+        'RESTRICTED': {
+            'Social Security Number (SSN)': "CONCAT('XXX-XX-', RIGHT(val, 4))",
+            'Credit Card Number': "CONCAT('XXXX-XXXX-XXXX-', RIGHT(REPLACE(val, '-', ''), 4))",
+            'Passport Number': "'*REDACTED*'",
+            'default': "'***RESTRICTED***'"
+        },
+        'CONFIDENTIAL': {
+            'Date of Birth': "CONCAT(YEAR(val), '-XX-XX')",
+            'Salary': "CONCAT('$', ROUND(val, -3))",
+            'Medical Record': "'MR******'",
+            'default': "'***CONFIDENTIAL***'"
+        },
+        'INTERNAL_USE': {
+            'Phone Number': "CONCAT('XXX-XXX-', RIGHT(val, 4))",
+            'Email Address': "CONCAT(LEFT(val, 2), '****@', SPLIT_PART(val, '@', 2))",
+            'Address': "CONCAT(SPLIT_PART(val, ' ', 1), ' ***')",
+            'default': "'***INTERNAL***'"
+        },
+        'PUBLIC': {
+            'default': "val"
+        }
+    }
+    
+    level_masks = masking_strategies.get(classification_level, {})
+    return level_masks.get(pii_type, level_masks.get('default', "val"))
+
+def generate_masking_policy_sql(policy_name, column_data_type, masking_function):
+    """Generate CREATE MASKING POLICY SQL statement."""
+    
+    sql = f"""
+CREATE OR REPLACE MASKING POLICY {policy_name}
+AS (val {column_data_type}) RETURNS {column_data_type} ->
+  CASE
+    WHEN CURRENT_ROLE() IN ('ACCOUNTADMIN', 'SYSADMIN', 'SECURITY_ADMIN') 
+      THEN val
+    ELSE {masking_function}
+  END;
+"""
+    return sql.strip()
+
+def apply_masking_policy_sql(database, schema, table, column, policy_name):
+    """Generate ALTER TABLE statement to apply masking policy."""
+    
+    sql = f"""
+ALTER TABLE {database}.{schema}.{table} 
+MODIFY COLUMN {column} 
+SET MASKING POLICY {policy_name};
+"""
+    return sql.strip()
+
+def execute_masking_policy(policy_sql, apply_sql):
+    """Execute masking policy creation and application."""
+    try:
+        # Create policy
+        session.sql(policy_sql).collect()
+        
+        # Apply policy
+        if apply_sql:
+            session.sql(apply_sql).collect()
+        
+        return True, "Policy created and applied successfully"
+    except Exception as e:
+        return False, str(e)
+
+# ========================================
+# SECURITY ADMIN APPROVAL PAGE
+# ========================================
+
+def render_security_approval():
+    st.subheader("🔐 Security Admin - PII Approval & Masking")
+    
+    if 'scan_results' not in st.session_state or st.session_state.scan_results.empty:
+        st.info("No scan results available. Run a PII scan first.")
+        return
+    
+    df = st.session_state.scan_results.copy()
+    
+    # Initialize approval status in session state
+    if 'approved_columns' not in st.session_state:
+        st.session_state.approved_columns = {}
+    
+    if 'rejected_columns' not in st.session_state:
+        st.session_state.rejected_columns = {}
+    
+    # Summary metrics
+    st.markdown("### 📊 Review Summary")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    total_findings = len(df)
+    approved_count = len(st.session_state.approved_columns)
+    rejected_count = len(st.session_state.rejected_columns)
+    pending_count = total_findings - approved_count - rejected_count
+    
+    with col1:
+        st.metric("Total Findings", total_findings)
+    with col2:
+        st.metric("✅ Approved", approved_count, delta=None)
+    with col3:
+        st.metric("❌ Rejected", rejected_count, delta=None)
+    with col4:
+        st.metric("⏳ Pending Review", pending_count, delta=None)
+    with col5:
+        completion = int((approved_count + rejected_count) / total_findings * 100) if total_findings > 0 else 0
+        st.metric("Progress", f"{completion}%")
+    
+    st.markdown("---")
+    
+    # Filter options
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        status_filter = st.selectbox(
+            "Filter by Status",
+            ["All", "Pending", "Approved", "Rejected"]
+        )
+    
+    with col2:
+        classification_filter = st.multiselect(
+            "Filter by Classification",
+            options=df['CLASSIFICATION_LEVEL'].unique(),
+            default=df['CLASSIFICATION_LEVEL'].unique()
+        )
+    
+    with col3:
+        confidence_filter = st.slider(
+            "Min Confidence Score",
+            min_value=0,
+            max_value=100,
+            value=0
+        )
+    
+    # Apply filters
+    filtered_df = df[
+        (df['CLASSIFICATION_LEVEL'].isin(classification_filter)) &
+        (df['CONFIDENCE_SCORE'] >= confidence_filter)
+    ]
+    
+    # Status filter
+    if status_filter == "Approved":
+        filtered_df = filtered_df[filtered_df.apply(
+            lambda row: f"{row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}" 
+            in st.session_state.approved_columns, axis=1
+        )]
+    elif status_filter == "Rejected":
+        filtered_df = filtered_df[filtered_df.apply(
+            lambda row: f"{row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}" 
+            in st.session_state.rejected_columns, axis=1
+        )]
+    elif status_filter == "Pending":
+        filtered_df = filtered_df[filtered_df.apply(
+            lambda row: f"{row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}" 
+            not in st.session_state.approved_columns and
+            f"{row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}" 
+            not in st.session_state.rejected_columns, axis=1
+        )]
+    
+    st.markdown(f"### 📋 Review Items ({len(filtered_df)} items)")
+    
+    # Bulk actions
+    col1, col2, col3 = st.columns([2, 2, 6])
+    with col1:
+        if st.button("✅ Approve All Visible", use_container_width=True):
+            for _, row in filtered_df.iterrows():
+                col_key = f"{row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}"
+                st.session_state.approved_columns[col_key] = row.to_dict()
+                if col_key in st.session_state.rejected_columns:
+                    del st.session_state.rejected_columns[col_key]
+            st.success(f"Approved {len(filtered_df)} items")
+            st.rerun()
+    
+    with col2:
+        if st.button("❌ Reject All Visible", use_container_width=True):
+            for _, row in filtered_df.iterrows():
+                col_key = f"{row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}"
+                st.session_state.rejected_columns[col_key] = row.to_dict()
+                if col_key in st.session_state.approved_columns:
+                    del st.session_state.approved_columns[col_key]
+            st.warning(f"Rejected {len(filtered_df)} items")
+            st.rerun()
+    
+    # Individual review items
+    for idx, row in filtered_df.iterrows():
+        col_key = f"{row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}"
+        
+        is_approved = col_key in st.session_state.approved_columns
+        is_rejected = col_key in st.session_state.rejected_columns
+        
+        # Status badge
+        if is_approved:
+            status_badge = "✅ APPROVED"
+            badge_color = "green"
+        elif is_rejected:
+            status_badge = "❌ REJECTED"
+            badge_color = "red"
+        else:
+            status_badge = "⏳ PENDING"
+            badge_color = "orange"
+        
+        with st.expander(f"{status_badge} | {row['TABLE_NAME']}.{row['COLUMN_NAME']} - {row['PII_TYPE']}", expanded=False):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"**Database:** `{row['DATABASE_NAME']}`")
+                st.markdown(f"**Schema:** `{row['SCHEMA_NAME']}`")
+                st.markdown(f"**Table:** `{row['TABLE_NAME']}`")
+                st.markdown(f"**Column:** `{row['COLUMN_NAME']}`")
+                st.markdown(f"**Data Type:** `{row['DATA_TYPE']}`")
+                
+                st.markdown("---")
+                
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    st.markdown(f"**PII Type:** {row['PII_TYPE']}")
+                with col_b:
+                    st.markdown(f"**Classification:** {row['CLASSIFICATION_LEVEL']}")
+                with col_c:
+                    st.markdown(f"**Confidence:** {row['CONFIDENCE_SCORE']}%")
+                
+                if row['COMPLIANCE_TAGS']:
+                    st.markdown(f"**Compliance:** {row['COMPLIANCE_TAGS']}")
+                
+                if row.get('MODEL_REASONING'):
+                    st.info(f"**AI Reasoning:** {row['MODEL_REASONING']}")
+                
+                st.markdown(f"**Sample:** `{row['SAMPLE_PATTERN']}`")
+            
+            with col2:
+                st.markdown("**Actions:**")
+                
+                approve_btn = st.button(
+                    "✅ Approve" if not is_approved else "✅ Approved",
+                    key=f"approve_{col_key}",
+                    disabled=is_approved,
+                    use_container_width=True,
+                    type="primary" if not is_approved else "secondary"
+                )
+                
+                reject_btn = st.button(
+                    "❌ Reject" if not is_rejected else "❌ Rejected",
+                    key=f"reject_{col_key}",
+                    disabled=is_rejected,
+                    use_container_width=True
+                )
+                
+                if approve_btn:
+                    st.session_state.approved_columns[col_key] = row.to_dict()
+                    if col_key in st.session_state.rejected_columns:
+                        del st.session_state.rejected_columns[col_key]
+                    st.rerun()
+                
+                if reject_btn:
+                    st.session_state.rejected_columns[col_key] = row.to_dict()
+                    if col_key in st.session_state.approved_columns:
+                        del st.session_state.approved_columns[col_key]
+                    st.rerun()
+    
+    # Generate masking policies section
+    if len(st.session_state.approved_columns) > 0:
+        st.markdown("---")
+        render_masking_policy_generator()
+
+def render_masking_policy_generator():
+    st.markdown("## 🎭 Generate Dynamic Masking Policies")
+    
+    approved_items = list(st.session_state.approved_columns.values())
+    
+    st.info(f"**{len(approved_items)} approved columns** are ready for masking policy generation")
+    
+    # Masking policy options
+    with st.expander("⚙️ Masking Policy Configuration", expanded=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            policy_prefix = st.text_input(
+                "Policy Name Prefix",
+                value="MASK_PII_",
+                help="Prefix for all generated masking policies"
+            )
+        
+        with col2:
+            exempt_roles = st.multiselect(
+                "Exempt Roles (can view unmasked data)",
+                options=['ACCOUNTADMIN', 'SYSADMIN', 'SECURITY_ADMIN', 'DATA_ADMIN', 'COMPLIANCE_ADMIN'],
+                default=['ACCOUNTADMIN', 'SYSADMIN', 'SECURITY_ADMIN'],
+                help="Roles that can see unmasked PII"
+            )
+        
+        auto_apply = st.checkbox(
+            "Automatically apply policies to columns",
+            value=True,
+            help="If checked, policies will be immediately applied to columns"
+        )
+    
+    # Preview masking policies
+    st.markdown("### 📄 Preview Masking Policies")
+    
+    policy_scripts = []
+    
+    for item in approved_items:
+        col_name = item['COLUMN_NAME']
+        table_name = item['TABLE_NAME']
+        
+        policy_name = f"{policy_prefix}{table_name}_{col_name}".upper()
+        masking_func = get_masking_function(item['PII_TYPE'], item['CLASSIFICATION_LEVEL'])
+        
+        # Generate policy SQL
+        policy_sql = f"""
+CREATE OR REPLACE MASKING POLICY {policy_name}
+AS (val {item['DATA_TYPE']}) RETURNS {item['DATA_TYPE']} ->
+  CASE
+    WHEN CURRENT_ROLE() IN ({', '.join([f"'{r}'" for r in exempt_roles])}) 
+      THEN val
+    ELSE {masking_func}
+  END;
+"""
+        
+        apply_sql = f"""
+ALTER TABLE {item['DATABASE_NAME']}.{item['SCHEMA_NAME']}.{item['TABLE_NAME']} 
+MODIFY COLUMN "{item['COLUMN_NAME']}" 
+SET MASKING POLICY {policy_name};
+"""
+        
+        policy_scripts.append({
+            'policy_name': policy_name,
+            'policy_sql': policy_sql.strip(),
+            'apply_sql': apply_sql.strip() if auto_apply else None,
+            'item': item
+        })
+    
+    # Display preview
+    for idx, script in enumerate(policy_scripts[:5]):  # Show first 5
+        with st.expander(f"Policy {idx+1}: {script['policy_name']}", expanded=(idx==0)):
+            st.code(script['policy_sql'], language='sql')
+            if script['apply_sql']:
+                st.code(script['apply_sql'], language='sql')
+    
+    if len(policy_scripts) > 5:
+        st.info(f"... and {len(policy_scripts) - 5} more policies")
+    
+    # Generate buttons
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("📥 Download SQL Scripts", use_container_width=True, type="secondary"):
+            full_script = "-- PII MASKING POLICIES\n"
+            full_script += "-- Generated by Enhanced PII Classifier\n"
+            full_script += f"-- Date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            full_script += f"-- Total Policies: {len(policy_scripts)}\n\n"
+            
+            for script in policy_scripts:
+                full_script += f"-- Policy for {script['item']['TABLE_NAME']}.{script['item']['COLUMN_NAME']}\n"
+                full_script += script['policy_sql'] + "\n\n"
+                if script['apply_sql']:
+                    full_script += script['apply_sql'] + "\n\n"
+                full_script += "-" * 80 + "\n\n"
+            
+            st.download_button(
+                "💾 Download Complete Script",
+                data=full_script,
+                file_name=f"masking_policies_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.sql",
+                mime="text/sql"
+            )
+    
+    with col2:
+        if st.button("🚀 Execute Policies", use_container_width=True, type="primary"):
+            st.markdown("### 🔄 Execution Progress")
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            results = []
+            
+            for idx, script in enumerate(policy_scripts):
+                status_text.text(f"Processing {idx+1}/{len(policy_scripts)}: {script['policy_name']}")
+                
+                # Execute policy creation
+                success, message = execute_masking_policy(script['policy_sql'], script['apply_sql'] or "")
+                
+                results.append({
+                    'policy_name': script['policy_name'],
+                    'column': f"{script['item']['TABLE_NAME']}.{script['item']['COLUMN_NAME']}",
+                    'status': 'Success' if success else 'Failed',
+                    'message': message
+                })
+                
+                progress_bar.progress((idx + 1) / len(policy_scripts))
+            
+            status_text.text("Execution completed!")
+            
+            # Show results
+            st.markdown("### 📊 Execution Results")
+            results_df = pd.DataFrame(results)
+            
+            success_count = len(results_df[results_df['status'] == 'Success'])
+            failed_count = len(results_df[results_df['status'] == 'Failed'])
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.metric("✅ Successful", success_count)
+            with col_b:
+                st.metric("❌ Failed", failed_count)
+            
+            st.dataframe(results_df, use_container_width=True, hide_index=True)
+            
+            if failed_count == 0:
+                st.success("All masking policies created and applied successfully!")
+            else:
+                st.warning(f"{failed_count} policies failed. Check error messages above.")
+    
+    with col3:
+        if st.button("🔄 Reset Approvals", use_container_width=True):
+            st.session_state.approved_columns = {}
+            st.session_state.rejected_columns = {}
+            st.success("All approvals reset")
+            st.rerun()
+
+
+# ========================================
+# MAIN APPLICATION
+# ========================================
+
+def main():
+    render_header()
+    
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio(
+        "Select Page",
+        ["Scanner", "Results", "Analytics", "Comparison", "Security Approval", "Reference"]
+    )
+    
+    if page == "Scanner":
+        render_scanner()
+    elif page == "Results":
+        render_results()
+    elif page == "Analytics":
+        render_analytics()
+    elif page == "Comparison":
+        render_comparison()
+    elif page == "Reference":
+        render_reference()
+    elif page == "Security Approval":
+        render_security_approval()
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### About")
+    st.sidebar.info("""
+    **Enhanced PII Classifier v3.0**
+    
+    Detection Modes:
+    - ⚡ Pattern: Fast rule-based
+    - 🎯 Hybrid: Smart combination
+    - 🤖 Model: AI-powered
+    
+    Features:
+    - Multi-strategy detection
+    - AI reasoning capture
+    - Method comparison
+    - Performance analytics
+    """)
+    
+    if 'scan_results' in st.session_state and not st.session_state.scan_results.empty:
+        df = st.session_state.scan_results
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### Current Scan")
+        st.sidebar.metric("PII Columns", len(df))
+        st.sidebar.metric("Tables", df['TABLE_NAME'].nunique())
+
+if __name__ == "__main__":
+    main()
