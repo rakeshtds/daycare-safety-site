@@ -1573,7 +1573,243 @@ def audit_pii_masking_status(scan_results_df):
 # MASKING POLICY AUDIT PAGE
 # ========================================
 
+
 def render_policy_audit():
+    st.subheader("🔍 Masking Policy Audit")
+    st.markdown("Compare approved PII columns with existing masking policies")
+    
+    # Check if there are approved columns
+    if 'approved_columns' not in st.session_state or len(st.session_state.approved_columns) == 0:
+        st.warning("⚠️ No approved columns found.")
+        st.info("💡 Please go to the 'Security Approval' page and approve PII columns first.")
+        return
+    
+    # Convert approved columns to DataFrame
+    approved_items = list(st.session_state.approved_columns.values())
+    df = pd.DataFrame(approved_items)
+    
+    st.info(f"**{len(approved_items)} approved columns** will be audited for masking policies")
+    
+    # Run audit button
+    if st.button("🔄 Run Masking Policy Audit", type="primary"):
+        with st.spinner("Auditing masking policies on approved columns..."):
+            # Get existing policies
+            existing_policies = get_existing_masking_policies()
+            st.session_state['existing_policies'] = existing_policies
+            
+            # Audit approved columns only
+            audit_df = audit_pii_masking_status(df)
+            st.session_state['audit_results'] = audit_df
+            
+        st.success("Audit completed!")
+        st.rerun()
+    
+    # Display results if audit has been run
+    if 'audit_results' in st.session_state:
+        audit_df = st.session_state['audit_results']
+        existing_policies = st.session_state.get('existing_policies', {})
+        
+        # Summary metrics
+        st.markdown("### 📊 Audit Summary")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        total_columns = len(audit_df)
+        protected_count = len(audit_df[audit_df['HAS_MASKING_POLICY'] == True])
+        unprotected_count = len(audit_df[audit_df['HAS_MASKING_POLICY'] == False])
+        protection_rate = int((protected_count / total_columns * 100)) if total_columns > 0 else 0
+        
+        with col1:
+            st.metric("Approved Columns", total_columns)
+        with col2:
+            st.metric("✅ Protected", protected_count)
+        with col3:
+            st.metric("⚠️ Unprotected", unprotected_count)
+        with col4:
+            st.metric("Protection Rate", f"{protection_rate}%")
+        with col5:
+            st.metric("Total Policies", len(existing_policies))
+        
+        # Protection rate chart
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Pie chart
+            fig_pie = px.pie(
+                values=[protected_count, unprotected_count],
+                names=['Protected', 'Unprotected'],
+                title="Masking Policy Coverage (Approved Columns)",
+                color_discrete_map={'Protected': '#10b981', 'Unprotected': '#f59e0b'}
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+        
+        with col2:
+            # Bar chart by classification level
+            protection_by_level = audit_df.groupby(['CLASSIFICATION_LEVEL', 'HAS_MASKING_POLICY']).size().reset_index(name='count')
+            fig_bar = px.bar(
+                protection_by_level,
+                x='CLASSIFICATION_LEVEL',
+                y='count',
+                color='HAS_MASKING_POLICY',
+                title="Protection Status by Classification Level",
+                labels={'HAS_MASKING_POLICY': 'Protected', 'count': 'Number of Columns'},
+                color_discrete_map={True: '#10b981', False: '#f59e0b'}
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+        
+        # Filters
+        st.markdown("---")
+        st.markdown("### 🔎 Detailed Audit Results")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            status_filter = st.selectbox(
+                "Filter by Status",
+                ["All", "Protected", "Unprotected"]
+            )
+        
+        with col2:
+            classification_filter = st.multiselect(
+                "Filter by Classification",
+                options=audit_df['CLASSIFICATION_LEVEL'].unique(),
+                default=audit_df['CLASSIFICATION_LEVEL'].unique()
+            )
+        
+        with col3:
+            search_term = st.text_input("🔎 Search columns...")
+        
+        # Apply filters
+        filtered_df = audit_df[audit_df['CLASSIFICATION_LEVEL'].isin(classification_filter)]
+        
+        if status_filter == "Protected":
+            filtered_df = filtered_df[filtered_df['HAS_MASKING_POLICY'] == True]
+        elif status_filter == "Unprotected":
+            filtered_df = filtered_df[filtered_df['HAS_MASKING_POLICY'] == False]
+        
+        if search_term:
+            mask = (
+                filtered_df['TABLE_NAME'].str.contains(search_term, case=False, na=False) |
+                filtered_df['COLUMN_NAME'].str.contains(search_term, case=False, na=False) |
+                filtered_df['PII_TYPE'].str.contains(search_term, case=False, na=False)
+            )
+            filtered_df = filtered_df[mask]
+        
+        st.write(f"**Showing {len(filtered_df)} of {len(audit_df)} columns**")
+        
+        # Display results table
+        if not filtered_df.empty:
+            def style_status(val):
+                if '✅' in str(val):
+                    return 'background-color: #d1fae5; color: #065f46'
+                else:
+                    return 'background-color: #fef3c7; color: #92400e'
+            
+            display_cols = ['SCHEMA_NAME', 'TABLE_NAME', 'COLUMN_NAME', 'PII_TYPE', 
+                           'CLASSIFICATION_LEVEL', 'STATUS', 'MASKING_POLICY_NAME']
+            
+            styled_df = filtered_df[display_cols].style.map(
+                style_status, subset=['STATUS']
+            )
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            
+            # Export options
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                csv_data = filtered_df.to_csv(index=False)
+                st.download_button(
+                    "📥 Download Audit Report (CSV)",
+                    data=csv_data,
+                    file_name=f"masking_audit_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+            
+            with col2:
+                # Show unprotected count
+                unprotected_df = filtered_df[filtered_df['HAS_MASKING_POLICY'] == False]
+                if not unprotected_df.empty:
+                    st.metric("Unprotected Approved Columns", len(unprotected_df))
+                    st.info("💡 Use 'Generate Masking Policies' in Security Approval page to protect these columns")
+        
+        # Show existing policies
+        st.markdown("---")
+        st.markdown("### 📚 Existing Masking Policies in Account")
+        
+        if existing_policies:
+            policy_list = []
+            for policy_name, details in existing_policies.items():
+                policy_list.append({
+                    'Policy Name': policy_name,
+                    'Database': details['database'],
+                    'Schema': details['schema'],
+                    'Owner': details['owner'],
+                    'Created On': details['created_on']
+                })
+            
+            policy_df = pd.DataFrame(policy_list)
+            st.dataframe(policy_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No existing masking policies found in the account")
+        
+        # Risk analysis
+        st.markdown("---")
+        st.markdown("### ⚠️ Risk Analysis")
+        
+        # High-risk unprotected columns
+        high_risk = audit_df[
+            (audit_df['HAS_MASKING_POLICY'] == False) & 
+            (audit_df['CLASSIFICATION_LEVEL'].isin(['RESTRICTED', 'CONFIDENTIAL']))
+        ]
+        
+        if not high_risk.empty:
+            st.error(f"🚨 **{len(high_risk)} HIGH-RISK approved columns are unprotected!**")
+            
+            with st.expander("View High-Risk Unprotected Columns", expanded=True):
+                risk_display = high_risk[['TABLE_NAME', 'COLUMN_NAME', 'PII_TYPE', 'CLASSIFICATION_LEVEL', 'CONFIDENCE_SCORE']]
+                st.dataframe(risk_display, use_container_width=True, hide_index=True)
+                
+                st.warning("""
+                **Recommended Actions:**
+                1. Go to 'Security Approval' page
+                2. Use 'Generate Dynamic Masking Policies' section
+                3. Apply masking policies to these approved columns
+                4. Return here to verify protection status
+                """)
+        else:
+            st.success("✅ All high-risk approved columns are protected!")
+        
+        # Compliance summary
+        st.markdown("---")
+        st.markdown("### 📋 Compliance Summary")
+        
+        compliance_summary = []
+        
+        for classification in ['RESTRICTED', 'CONFIDENTIAL', 'INTERNAL_USE', 'PUBLIC']:
+            level_df = audit_df[audit_df['CLASSIFICATION_LEVEL'] == classification]
+            if not level_df.empty:
+                protected = len(level_df[level_df['HAS_MASKING_POLICY'] == True])
+                total = len(level_df)
+                rate = int((protected / total * 100)) if total > 0 else 0
+                
+                compliance_summary.append({
+                    'Classification Level': classification,
+                    'Total Approved': total,
+                    'Protected': protected,
+                    'Unprotected': total - protected,
+                    'Protection Rate': f"{rate}%"
+                })
+        
+        if compliance_summary:
+            summary_df = pd.DataFrame(compliance_summary)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    
+    else:
+        st.info("Click 'Run Masking Policy Audit' button above to start the audit")
+
+        
+def render_policy_audit1():
     st.subheader("🔍 Masking Policy Audit")
     st.markdown("Compare PII scan results with existing masking policies")
     
