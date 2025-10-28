@@ -1,1108 +1,3 @@
--- =========================================================
--- CDE MANAGEMENT SYSTEM - COMPLETE SQL SETUP (FROM SCRATCH)
--- Data Source: PL_CriticalDataElements.csv (272 CDEs)
--- =========================================================
-
--- =========================================================
--- STEP 1: DROP EXISTING TABLES (CLEAN START)
--- =========================================================
-
-DROP TABLE IF EXISTS CDE_SCAN_RESULTS;
-DROP TABLE IF EXISTS CDE_PATTERN_RULES;
-DROP TABLE IF EXISTS CDE_AUDIT_LOG;
-DROP TABLE IF EXISTS CDE_EXCLUSION_PATTERNS;
-DROP TABLE IF EXISTS CDE_REFERENCE;
-
--- =========================================================
--- STEP 2: CREATE CDE_REFERENCE TABLE
--- =========================================================
-
-CREATE TABLE CDE_REFERENCE (
-    CDE_ID NUMBER AUTOINCREMENT,
-    DOMAIN VARCHAR(200),
-    TAG VARCHAR(200),
-    ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
-    IS_PII VARCHAR(1),
-    DEFINITION TEXT,
-    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
-    UPDATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    UPDATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
-    IS_ACTIVE BOOLEAN DEFAULT TRUE,
-    PRIMARY KEY (CDE_ID)
-);
-
--- =========================================================
--- STEP 3: CREATE CDE_PATTERN_RULES TABLE
--- =========================================================
-
-CREATE TABLE CDE_PATTERN_RULES (
-    PATTERN_ID NUMBER AUTOINCREMENT,
-    CDE_ID NUMBER NOT NULL,
-    PATTERN_TYPE VARCHAR(50) NOT NULL,
-    PATTERN_VALUE VARCHAR(500) NOT NULL,
-    PATTERN_PRIORITY NUMBER(3) NOT NULL,
-    IS_ACTIVE BOOLEAN DEFAULT TRUE,
-    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
-    PRIMARY KEY (PATTERN_ID)
-);
-
--- =========================================================
--- STEP 4: CREATE CDE_SCAN_RESULTS TABLE
--- =========================================================
-
-CREATE TABLE CDE_SCAN_RESULTS (
-    SCAN_ID NUMBER AUTOINCREMENT,
-    SCAN_RUN_ID VARCHAR(100),
-    SCAN_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    SCAN_USER VARCHAR(100) DEFAULT CURRENT_USER(),
-    DATABASE_NAME VARCHAR(200),
-    SCHEMA_NAME VARCHAR(200),
-    TABLE_NAME VARCHAR(200),
-    COLUMN_NAME VARCHAR(200),
-    DATA_TYPE VARCHAR(100),
-    MATCHED_CDE_ID NUMBER,
-    MATCHED_DOMAIN VARCHAR(200),
-    MATCHED_TAG VARCHAR(200),
-    MATCHED_ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
-    MATCHED_IS_PII VARCHAR(1),
-    MATCHED_DEFINITION TEXT,
-    PATTERN_ID NUMBER,
-    PATTERN_TYPE VARCHAR(50),
-    PATTERN_VALUE VARCHAR(500),
-    MATCH_SCORE NUMBER(5,2),
-    MATCH_REASON VARCHAR(2000),
-    MATCH_METHOD VARCHAR(50),
-    AI_VALIDATED BOOLEAN,
-    IS_REVIEWED BOOLEAN DEFAULT FALSE,
-    REVIEW_STATUS VARCHAR(50),
-    REVIEW_NOTES TEXT,
-    REVIEWED_BY VARCHAR(100),
-    REVIEWED_DATE TIMESTAMP_NTZ,
-    PRIMARY KEY (SCAN_ID)
-);
-
--- =========================================================
--- STEP 5: CREATE CDE_AUDIT_LOG TABLE
--- =========================================================
-
-CREATE TABLE CDE_AUDIT_LOG (
-    AUDIT_ID NUMBER AUTOINCREMENT,
-    TABLE_NAME VARCHAR(100),
-    OPERATION_TYPE VARCHAR(50),
-    RECORD_ID NUMBER,
-    OLD_VALUE TEXT,
-    NEW_VALUE TEXT,
-    CHANGED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
-    CHANGED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    PRIMARY KEY (AUDIT_ID)
-);
-
--- =========================================================
--- STEP 6: CREATE CDE_EXCLUSION_PATTERNS TABLE
--- =========================================================
-
-CREATE TABLE CDE_EXCLUSION_PATTERNS (
-    EXCLUSION_ID NUMBER AUTOINCREMENT,
-    EXCLUSION_TYPE VARCHAR(50),
-    EXCLUSION_VALUE VARCHAR(500),
-    EXCLUSION_REASON TEXT,
-    IS_ACTIVE BOOLEAN DEFAULT TRUE,
-    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
-    PRIMARY KEY (EXCLUSION_ID)
-);
-
--- =========================================================
--- STEP 7: CREATE REPORTING VIEWS
--- =========================================================
-
--- View 1: Latest scan results per column
-CREATE OR REPLACE VIEW VW_CDE_LATEST_SCAN AS
-SELECT 
-    s.*,
-    ROW_NUMBER() OVER (
-        PARTITION BY s.DATABASE_NAME, s.SCHEMA_NAME, s.TABLE_NAME, s.COLUMN_NAME 
-        ORDER BY s.SCAN_DATE DESC
-    ) as RN
-FROM CDE_SCAN_RESULTS s
-QUALIFY RN = 1;
-
--- View 2: PII elements summary
-CREATE OR REPLACE VIEW VW_CDE_PII_ELEMENTS AS
-SELECT 
-    DATABASE_NAME,
-    SCHEMA_NAME,
-    TABLE_NAME,
-    COLUMN_NAME,
-    MATCHED_ATTRIBUTE_LOGICAL_NAME,
-    MATCHED_DOMAIN,
-    SCAN_DATE
-FROM CDE_SCAN_RESULTS
-WHERE MATCHED_IS_PII = 'Y'
-ORDER BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME;
-
--- View 3: CDE summary by domain
-CREATE OR REPLACE VIEW VW_CDE_SUMMARY_BY_DOMAIN AS
-SELECT 
-    MATCHED_DOMAIN,
-    COUNT(DISTINCT MATCHED_CDE_ID) as UNIQUE_CDES,
-    COUNT(*) as TOTAL_MATCHES,
-    SUM(CASE WHEN MATCHED_IS_PII = 'Y' THEN 1 ELSE 0 END) as PII_COUNT,
-    COUNT(DISTINCT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TABLE_NAME) as TABLES_AFFECTED
-FROM CDE_SCAN_RESULTS
-GROUP BY MATCHED_DOMAIN
-ORDER BY TOTAL_MATCHES DESC;
-
--- View 4: CDE summary by schema
-CREATE OR REPLACE VIEW VW_CDE_SUMMARY_BY_SCHEMA AS
-SELECT 
-    DATABASE_NAME,
-    SCHEMA_NAME,
-    COUNT(DISTINCT TABLE_NAME) as TABLES_WITH_CDES,
-    COUNT(DISTINCT COLUMN_NAME) as CDE_COLUMNS,
-    SUM(CASE WHEN MATCHED_IS_PII = 'Y' THEN 1 ELSE 0 END) as PII_COLUMNS,
-    MAX(SCAN_DATE) as LAST_SCAN_DATE
-FROM CDE_SCAN_RESULTS
-GROUP BY DATABASE_NAME, SCHEMA_NAME
-ORDER BY PII_COLUMNS DESC, CDE_COLUMNS DESC;
-
--- View 5: Unreviewed matches
-CREATE OR REPLACE VIEW VW_CDE_UNREVIEWED_MATCHES AS
-SELECT 
-    SCAN_ID,
-    DATABASE_NAME,
-    SCHEMA_NAME,
-    TABLE_NAME,
-    COLUMN_NAME,
-    MATCHED_ATTRIBUTE_LOGICAL_NAME,
-    MATCHED_IS_PII,
-    MATCH_SCORE,
-    SCAN_DATE
-FROM CDE_SCAN_RESULTS
-WHERE IS_REVIEWED = FALSE
-ORDER BY MATCHED_IS_PII DESC, SCAN_DATE DESC;
-
--- =========================================================
--- VERIFICATION
--- =========================================================
-
-SELECT 'Tables Created' as STATUS, COUNT(*) as COUNT
-FROM INFORMATION_SCHEMA.TABLES 
-WHERE TABLE_NAME IN ('CDE_REFERENCE', 'CDE_PATTERN_RULES', 'CDE_SCAN_RESULTS', 
-                     'CDE_AUDIT_LOG', 'CDE_EXCLUSION_PATTERNS')
-
-UNION ALL
-
-SELECT 'Views Created' as STATUS, COUNT(*) as COUNT
-FROM INFORMATION_SCHEMA.VIEWS
-WHERE TABLE_NAME LIKE 'VW_CDE_%';
-
--- Expected Output:
--- Tables Created: 5
--- Views Created: 5
-
-
-
--- =========================================================
--- LOAD CDE REFERENCE DATA FROM CSV
--- Source: PL_CriticalDataElements.csv (271 CDEs)
--- =========================================================
-
-INSERT INTO CDE_REFERENCE (DOMAIN, TAG, ATTRIBUTE_LOGICAL_NAME, IS_PII, DEFINITION)
-VALUES
-('Claims', 'Event Details', 'CLAIM DATE OF LOSS', 'N', 'Actual date when the loss/claim happened'),
-('Claims', 'Financial Metrics', 'CLAIM PAID AMOUNT', 'N', 'Total claim amount to be paid to the beneficiaries'),
-('Claims', 'Financial Metrics', 'CLAIM PAID DATE', 'N', 'Date when the funds were released from claim to pay to the beneficiaries'),
-('Claims', 'Status / Workflow', 'CLAIM STATUS CHANGE DATE', 'N', 'Last claim status change date'),
-('Claims', 'Status / Workflow', 'CLAIM STATUS CODE', 'N', 'Current status of the claim such as in progress'),
-('Claims', 'Status / Workflow', 'CLAIM STATUS REASON CODE', 'N', 'Beneficiaries verified etc.'),
-('Claims', 'Claims Info', 'DEATH CERTIFICATE CERTIFIED DATE', 'N', 'Date of death as recorded in the death certificate if applicable to a claim'),
-('Claims', 'Event Details', 'LOSS REPORT DATE', 'N', 'Date when loss/claim was reported to the insurance carrier'),
-('Claims', 'Event Details', 'CLAIM SUBMISSION DATE', 'N', 'Date when the claim was submitted to the insurer'),
-('Claims', 'Classification', 'CLAIM TYPE', 'N', 'Type of claim (e.g.'),
-('Claims', 'Financial Metrics', 'DEDUCTIBLE / CO-PAY AMOUNT', 'N', 'Amount to be borne by the insured before claim payment'),
-('Claims', 'Financial Metrics', 'REINSURANCE RECOVERABLES', 'N', 'Amount to be recovered from reinsurer for the claim'),
-('Claims', 'Financial Metrics', '[Premium/Payment Details]', 'N', 'This is the sum of all payments due in a policy year for fixed premium products including policy fee'),
-('Coverage/Rider', 'Premium Amounts', 'ANNUALIZED PREMIUM AMOUNT', 'N', 'The effective date is the date on which the legal obligation by the insurance company for the coverage is created'),
-('Coverage/Rider', 'Core Component Info', 'COMPONENT EFFECTIVE DATE', 'N', 'Last date when the contract component status changed'),
-('Coverage/Rider', 'Core Component Info', 'COMPONENT STATUS CHANGE DATE', 'N', 'Current status of this coverage on a policy (excludes supplemental benefits). Updated daily'),
-('Coverage/Rider', 'Core Component Info', 'COMPONENT STATUS CODE', 'N', 'The total value of premiums paid into the contract for the particular component'),
-('Coverage/Rider', 'Life Premium Info', 'COMPONENT TOTAL PREMIUM PAID AMOUNT', 'N', 'Current benefit amount of a life policy coverage/rider/current fund value or annuity fund'),
-('Coverage/Rider', 'Core Component Info', 'CURRENT COMPONENT VALUE AMOUNT', 'N', 'This is the dollar amount that the policy owner''s beneficiaries will receive upon the death of the insured'),
-('Coverage/Rider', 'Core Component Info', 'FACE AMOUNT', 'N', 'This is the dollar amount that the policy owner''s beneficiaries will receive upon the death of the insured. The face amount is the death benefit for term life policies'),
-('Coverage/Rider', 'Core Component Info', 'ORIGINAL COMPONENT VALUE AMOUNT', 'N', 'Original benefit amount of a life policy coverage/rider/original fund value of an annuity fund'),
-('Coverage/Rider', 'Life Premium Info', 'PAY UP DATE', 'N', 'The date through which the coverage (base coverage or rider) is paid up'),
-('Coverage/Rider', 'Entity Key Fields', 'PLAN CODE', 'N', 'Plan Code (otherwise known as product code) of coverage or benefit attached to a policy'),
-('Coverage/Rider', 'Core Component Info', 'POLICY EXHIBIT CODE', 'N', 'This column indicates how to process the face amount change. Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
-('Coverage/Rider', 'Policy Component', 'PRODUCT CODE', 'N', 'to help isolate different domain sets for the same reference lookup data. This source could be a system feed or just the system -- whatever granularity is necessary to uniquely identify the domain value set'),
-('Coverage/Rider', 'Entity Key Fields', 'SOURCE CODE', 'N', 'Unique number to identify the component(coverage/fund/provision/rider) from the source system'),
-('Coverage/Rider', 'Entity Key Fields', 'SOURCE COMPONENT NUMBER', 'N', 'Unique number to identify the component(coverage/fund/provision/rider) from the source system in combination with source code'),
-('Coverage/Rider', 'Entity Key Fields', 'SUBSTANDARD RATING TABLE NAME', 'N', 'Name of the rating table associated to a substandard rate/percentage'),
-('Finance/Accounting', 'Accounting Info', 'STATE IDENTIFIER', 'N', 'The two position alphabetic abbreviation for the state or province where the party resides'),
-('Financial Professional', 'Transaction Info', 'COMMISSION RATE SCHEDULE IDENTIFIER', 'N', 'Unique key/Code identifying the commission schedule attached to the transaction( if applicable)'),
-('Financial Professional', 'Transaction Info', 'COMMISSINABLE PREMIUM AMOUNT', 'N', 'Premium amount used for calculation of commissions (if applicable)'),
-('Financial Professional', 'Transaction Info', 'COMMISSION RATE PERCENT', 'N', 'Commission rate percentage used as per policy guidelines (if applicable)'),
-('Financial Professional', 'Employee Info', 'FULL NAME', 'N', 'Contains the official name of the producer including their first'),
-('Financial Professional', 'Producer Info', 'LAST NAME', 'N', 'The surname of a person provided for the application (Standard)'),
-('Financial Professional', 'Entity Key Fields', 'PRODUCER HIERARCHY LEVEL', 'N', 'The position of a producer within the Kemper agency hierarchy (e.g. agency'),
-('Financial Professional', 'Producer Info', 'PRODUCER NIPR NUMBER', 'N', 'The agent''s National Insurance Producer Registry (NIPR) number. The date of the agent''s appointment with the company post to the verification of their license information'),
-('Financial Professional', 'Producer Info', 'PRODUCER PERMANENT APPOINTMENT DATE', 'N', 'Identifies the current active or inactive status of the agent'),
-('Financial Professional', 'Producer Info', 'PRODUCER STATUS CODE', 'N', 'The date of the agent''s termination date'),
-('Financial Professional', 'Producer Info', 'PRODUCER TERMINATION DATE', 'N', 'The date of the agent''s termination date'),
-('Financial Professional', 'Entity Key Fields', 'TRANSACTION AMOUNT', 'N', 'Gross Transaction Amount attached to the transaction'),
-('Investment Funds', 'Identification', 'FUND ID', 'N', 'Unique system-generated identifier assigned to each fund'),
-('Investment Funds', 'Fund Details', 'FUND NAME', 'N', 'Official name of the fund (e.g.'),
-('Investment Funds', 'Identification', 'FUND CODE', 'N', 'Internal or external code representing the fund'),
-('Investment Funds', 'Classification', 'FUND TYPE', 'N', 'Category/type of fund (e.g.'),
-('Investment Funds', 'Classification', 'FUND FAMILY', 'N', 'Group or family of funds to which the fund belongs'),
-('Investment Funds', 'Identification', 'CUSIP NUMBER', 'N', 'Unique 9-character alphanumeric identifier assigned to the fund security'),
-('Investment Funds', 'Identification', 'ISIN', 'N', 'International Securities Identification Number for the fund'),
-('Investment Funds', 'Identification', 'TICKER SYMBOL', 'N', 'Unique market symbol under which the fund trades'),
-('Investment Funds', 'Fund Details', 'FUND INCEPTION DATE', 'N', 'Date on which the fund was first established'),
-('Investment Funds', 'Fund Details', 'FUND CURRENCY', 'N', 'Currency in which the fund is denominated and reported'),
-('Investment Funds', 'Financials', 'NET ASSET VALUE (NAV)', 'N', 'The per-unit market value of the fund'),
-('Investment Funds', 'Financials', 'EXPENSE RATIO', 'N', 'The percentage of fund assets used to cover operating expenses'),
-('Investment Funds', 'Financials', 'MANAGEMENT FEE', 'N', 'The fee charged by the fund manager for managing the fund'),
-('Investment Funds', 'Risk & Compliance', 'RISK CLASSIFICATION', 'N', 'Risk level of the fund (e.g.'),
-('Investment Funds', 'Performance', 'BENCHMARK INDEX', 'N', 'The index against which the fund''s performance is measured'),
-('Investment Funds', 'Fund Details', 'INVESTMENT OBJECTIVE', 'N', 'The stated purpose of the fund (e.g.'),
-('Investment Funds', 'Fund Details', 'ASSET ALLOCATION', 'N', 'Breakdown of investments across asset classes (e.g.'),
-('Investment Funds', 'Management', 'FUND MANAGER NAME', 'N', 'Name of the portfolio/fund manager responsible for managing the fund'),
-('Investment Funds', 'Management', 'FUND MANAGER ID', 'N', 'Unique identifier of the fund manager'),
-('Investment Funds', 'Compliance', 'REGULATORY REGISTRATION', 'N', 'Registration number of details with regulatory authorities (e.g.'),
-('Investment Funds', 'Operations', 'DISTRIBUTION CHANNEL', 'N', 'Channel through which the fund is sold (e.g.'),
-('New Business/ Application', 'Core_Issue', 'AGE', 'N', 'Age of party attached at COVERAGE issue for individual policies. Doesn''t apply for group policy'),
-('New Business/ Application', 'Core_Issue', 'BIRTH COUNTRY CODE', 'N', 'The country where the party was born'),
-('New Business/ Application', 'Core_Issue', 'BIRTH DATE', 'Y', 'The party''s date of birth (for individual policies) (Standard)'),
-('New Business/ Application', 'Core_Issue', 'BIRTH STATE CODE', 'N', 'State'),
-('New Business/ Application', 'Core_Issue', 'GENDER CODE', 'N', 'Gender Code of COVERAGE party at Policy COVERAGE issue; used for determining premium rates and rating class'),
-('New Business/ Application', 'Core_Issue', 'POLICY CURRENCY CODE', 'N', 'ISO currency code indicating the currently the transaction was carried on'),
-('New Business/ Application', 'Core_Issue', '[Product/Coverage Code]', 'N', 'Unique code provided by the source system to identify a coverage'),
-('New Business/ Application', 'Application_Info', 'PLAN CODE', 'N', 'Policy number/contract number from the source administrative system connected with the application or quote'),
-('New Business/ Application', 'Application_Info', 'POLICY NUMBER', 'N', 'Policy number/contract number from the source administrative system connected with the application or quote'),
-('New Business/ Application', 'Application_Info', 'QUOTED PREMIUM MODE CODE', 'N', 'The quoted frequency of premium payment'),
-('New Business/ Application', 'Natural_Key', 'SOURCE CODE', 'N', 'A standard code to identify the data source for the ETL process and to help isolate different domain sets for the same reference lookup data. This source could be a system feed or just the system -- whatever granularity is necessary to uniquely identify the domain value set'),
-('New Business/ Application', 'Application Information', 'APPLICATION ID', 'N', 'A unique identifier assigned to each new insurance application to track its progress'),
-('New Business/ Application', 'Application Information', 'APPLICATION DATE', 'N', 'The date the insurance application was submitted by the applicant'),
-('New Business/ Application', 'Applicant / Parties', 'APPLICANT NAME', 'Y', 'The legal name of the person applying for the policy'),
-('New Business/ Application', 'Applicant / Parties', 'APPLICANT DOB', 'Y', 'Date of birth of the applicant'),
-('New Business/ Application', 'Applicant / Parties', 'APPLICANT SSN / TAX ID', 'Y', 'Social Security Number or Tax Identification Number provided for identification and regulatory compliance'),
-('New Business/ Application', 'Applicant / Parties', 'APPLICANT ADDRESS', 'Y', 'Residential or mailing address of the applicant'),
-('New Business/ Application', 'Applicant / Parties', 'APPLICANT CONTACT INFO', 'Y', 'Phone number(s) and email address of the applicant'),
-('New Business/ Application', 'Applicant / Parties', 'GENDER', 'Y', 'Gender of the applicant'),
-('New Business/ Application', 'Risk & Underwriting', 'SMOKING STATUS', 'N', 'Whether the applicant is a smoker or non-smoker'),
-('New Business/ Application', 'Risk & Underwriting', 'OCCUPATION', 'Y', 'Applicant''s job or profession'),
-('New Business/ Application', 'Financial Information', 'ANNUAL INCOME', 'Y', 'Applicant''s income level'),
-('New Business/ Application', 'Product Information', 'REQUESTED PRODUCT TYPE', 'N', 'Type of insurance product applied for (e.g.'),
-('New Business/ Application', 'Product Information', 'COVERAGE AMOUNT (FACE VALUE)', 'N', 'The benefit amount requested in the application'),
-('New Business/ Application', 'Financial Information', 'PREMIUM MODE & AMOUNT', 'N', 'Frequency (monthly'),
-('New Business/ Application', 'Intermediary / Producer', 'AGENT / PRODUCER ID', 'N', 'Identifier for the licensed agent or producer submitting the application'),
-('New Business/ Application', 'Intermediary / Producer', 'AGENT CONTACT INFORMATION', 'N', 'Contact details of the agent or producer associated with the application'),
-('New Business/ Application', 'Risk & Underwriting', 'UNDERWRITING DECISION', 'N', 'Outcome of the underwriting review (e.g.'),
-('New Business/ Application', 'Policy Information', 'POLICY EFFECTIVE DATE', 'N', 'The date when coverage under the policy will begin if the application is approved'),
-('Policy', 'Policy Holder Values', 'ACCOUNT VALUE AMOUNT', 'N', 'UL & Ann PH Acct Bal reported on GAAP Bal Sht is adjusted for accrued interest (added) & pending claims (subtracted)'),
-('Policy', 'Life Billing Info', 'BILLING MODE CODE', 'N', 'Identifies the current frequency of incoming payments: AN = Annual'),
-('Policy', 'Policy Holder Values', 'CASH VALUE AMOUNT', 'N', 'Contract to cash surrender value. Also called inside build-up and policy owner''s equity'),
-('Policy', 'Life Billing Info', 'COMMISSION OVERRIDE CODE', 'N', 'Source administrative system''s override code if there is a commission override on this policy. (Note that this is an indicator for an override or non-payment of a commission amount'),
-('Policy', 'Core Issue Info', 'CONTESTABILITY END DATE', 'N', 'The end date of the period of time (two years) during which an insurer may challenge the validity of a life insurance policy'),
-('Policy', 'Loan Info', 'CUMMULATIVE INTEREST AMOUNT', 'N', 'Cumulative Interest accrued since the origination of the loan'),
-('Policy', 'Loan Info', 'CUMMULATIVE INTEREST AMOUNT', 'N', 'Cumulative Interest accrued since the origination of the loan'),
-('Policy', 'Loan Info', 'EFFECTIVE DATE', 'N', 'Indicates the date on which the legal obligation by the insurance company is created'),
-('Policy', 'Core Issue Info', 'EFFECTIVE DATE', 'N', 'Indicates the date on which the legal obligation by the insurance company is created'),
-('Policy', 'Loan Info', 'GRACE PERIOD END DATE', 'N', 'the policy'),
-('Policy', 'Loan Info', 'INTEREST METHOD CODE', 'N', 'Defines the basis for calculating loan interest (in advance or in arrears)'),
-('Policy', 'Loan Info', 'INTEREST PAID TO DATE', 'N', 'The date the interest is paid to'),
-('Policy', 'Loan Info', 'INTEREST RATE', 'N', 'The interest rate of the loan'),
-('Policy', 'Core Issue Info', 'ISSUE DATE', 'N', 'The date when the insurance company approves and accepts the application'),
-('Policy', 'Life Billing Info', 'LAPSED DATE', 'N', 'The date the policy terminates for non-payment of premiums'),
-('Policy', 'Loan Info', 'LOAN INTEREST DUE AMOUNT', 'N', 'Amount of interest charged for current year'),
-('Policy', 'Loan Info', 'LOAN PRINCIPAL AMOUNT', 'N', 'Remaining Principal Amount on the loan'),
-('Policy', 'Loan Info', 'LOAN STATUS CODE', 'N', 'Indicates the status of the Loan (If there is a loan on a policy inforce = active'),
-('Policy', 'Entity Key Fields', 'LOAN TYPE', 'N', 'Identifies whether there is a loan or a lien on a policy'),
-('Policy', 'Premium Amounts', 'MODAL PREMIUM AMOUNT', 'N', 'The calculated premium amount due by every billing cycle based on the premium mode selected'),
-('Policy', 'Loan Info', 'ORIGINAL LOAN AMOUNT', 'N', 'The total amount of the loan at the time of issue'),
-('Policy', 'Life Billing Info', 'PAID TO DATE', 'N', 'This is the date the policy is paid to (Paid through date is one day prior to this day)'),
-('Policy', 'Loan Info', 'PAYMENT AMOUNT', 'N', 'The expected amount of each loan payment'),
-('Policy', 'Life Billing Info', 'PAYMENT DUE DATE', 'N', 'The date when the next payment is due'),
-('Policy', 'Loan Info', 'PAYMENT METHOD CODE', 'N', 'Indicates the approved method of payment on the policy/contract (check'),
-('Policy', 'Loan Info', 'PAYOFF BALANCE AMOUNT', 'N', 'The amount required to completely payoff the loan balance'),
-('Policy', 'Loan Info', 'PAYOFF BALANCE AS OF DATE', 'N', 'The date the payoff balance was last calculated'),
-('Policy', 'Status Info', 'POLICY STATUS CODE', 'N', 'A code that represents if a policy is in-force or not in-force (e.g.'),
-('Policy', 'Status Info', 'POLICY SUSPEND CODE', 'N', 'code that indicates the suspension of coverage occurs when an insurance company stops covering a policyholder'),
-('Policy', 'Assignment Info', 'PRODUCT CODE', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
-('Policy', 'Status Info', 'STATUS CHANGE DATE', 'N', 'The date when last policy/contract status change happened'),
-('Policy', 'Termination/Surrender', 'TERMINATION DATE', 'N', 'The date in which the company no longer has any obligation on the policy or riders'),
-('Policy', 'Entity Key Fields', 'WAIVER PREMIUM AMOUNT', 'N', 'Amount of premium that is waived in the current policy year if a policy is on a waiver of premium type benefit'),
-('Policy', 'Core_Issue_Info', 'ISSUE STATE CODE', 'N', 'State/territory/province where the application is signed'),
-('Policy', 'Status_Info', 'POLICY TERMINATION REASON CODE', 'N', 'Additional processing details that resulted in termination status of the policy'),
-('Policy', 'Premium_Amounts', 'PREMIUM ON DEPOSIT ACCRUED INTEREST AMOUNT', 'N', 'The accrued interest on the premium on deposit account for a contract'),
-('Policy', 'Policy', 'POLICY REJECTION REASON CODE', 'N', 'Code that indicates the reason that policy is rejected post Underwriting process. E.g. Medical'),
-('PolicyHolder/Party', 'Name Info', 'PREFIX TITLE NAME', 'N', 'A title or honorific added to the beginning of someone''s name (Mr'),
-('PolicyHolder/Party', 'Contact Info 1', 'STATE IDENTIFIER', 'Y', 'The two position alphabetic abbreviation for the state or province where the party resides'),
-('PolicyHolder/Party', 'Name Info', 'SUFFIX TITLE NAME', 'N', 'This is the first name of a person provided on the application. This field is not used with non-person entities (e.g. funeral homes)'),
-('PolicyHolder/Party', 'Identification', 'PARTY ID', 'N', 'Unique system-generated identifier assigned to a party (person or organization)'),
-('PolicyHolder/Party', 'Personal Details', 'FIRST NAME', 'Y', 'The given name of an individual party'),
-('PolicyHolder/Party', 'Personal Details', 'LAST NAME', 'Y', 'The family name or surname of an individual party'),
-('PolicyHolder/Party', 'Personal Details', 'MIDDLE NAME', 'Y', 'The additional given name(s) of an individual party'),
-('PolicyHolder/Party', 'Personal Details', 'FULL LEGAL NAME', 'Y', 'Complete legal name of the party (individual or organization)'),
-('PolicyHolder/Party', 'Demographics', 'DATE OF BIRTH', 'Y', 'The birth date of an individual party'),
-('PolicyHolder/Party', 'Demographics', 'GENDER', 'Y', 'The gender identity of an individual party'),
-('PolicyHolder/Party', 'Identification', 'SOCIAL SECURITY NUMBER', 'Y', 'Government-issued identification number used for tax and legal purposes'),
-('PolicyHolder/Party', 'Identification', 'TAX IDENTIFICATION NUMBER', 'Y', 'Unique identifier issued by a government authority for tax purposes'),
-('PolicyHolder/Party', 'Contact Details', 'ADDRESS LINE 1', 'Y', 'Primary street address information of the party'),
-('PolicyHolder/Party', 'Contact Details', 'ADDRESS LINE 2', 'Y', 'Additional address information of the party'),
-('PolicyHolder/Party', 'Contact Details', 'CITY', 'Y', 'The city portion of the party''s address'),
-('PolicyHolder/Party', 'Contact Details', 'STATE/PROVINCE', 'Y', 'The state or province portion of the party''s address'),
-('PolicyHolder/Party', 'Contact Details', 'COUNTRY', 'Y', 'The country of residence or registration of the party'),
-('PolicyHolder/Party', 'Contact Details', 'POSTAL CODE/ZIP', 'Y', 'Postal or ZIP code for mailing purposes'),
-('PolicyHolder/Party', 'Contact Details', 'PHONE NUMBER', 'Y', 'Primary telephone number for the party'),
-('PolicyHolder/Party', 'Contact Details', 'EMAIL ADDRESS', 'Y', 'Email address of the party'),
-('PolicyHolder/Party', 'Demographics', 'CITIZENSHIP', 'Y', 'The country of citizenship for the party'),
-('PolicyHolder/Party', 'Demographics', 'OCCUPATION', 'Y', 'Current or most recent occupation of the party'),
-('PolicyHolder/Party', 'Demographics', 'EMPLOYER NAME', 'N', 'Name of the organization employing the party'),
-('PolicyHolder/Party', 'Relationship', 'PARTY ROLE', 'N', 'The role the party plays in the business process (e.g.'),
-('PolicyHolder/Party', 'Relationship', 'RELATIONSHIP TO INSURED', 'N', 'The relationship between the party and the insured individual'),
-('PolicyHolder/Party', 'Demographics', 'MARITAL STATUS', 'N', 'Legal marital status of the individual party'),
-('Product', 'Product Info', 'BEGIN DATE', 'N', 'Date when product was released for selling'),
-('Product', 'Product Benefit Info', 'BENEFIT CHANGE', 'N', 'Indicates whether there has been a benefit change to the plan. Derived from the plan/product type description in ADMI and Life70'),
-('Product', 'Product Info', 'END DATE', 'N', 'Date when product for closed for sales'),
-('Product', 'Annuity Product Info', 'FREE WITHDRAWAL AMOUNT', 'N', 'The amount of money that is available for surrender without any surrender charges during annuity contract year (If applicable)'),
-('Product', 'Product Info', 'GI PRODUCT CODE', 'N', 'Indicates if Guarantee Issue plan; Yes (1) No (0). Derived from plan/product type description in ADMI and Life70'),
-('Product', 'Product Categorization Info', 'PRODUCT CLASS NAME', 'N', 'Product class name capturing different variations of the product in terms of provisions'),
-('Product', 'Entity Key Fields', 'PRODUCT CODE', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
-('Product', 'Product Info', 'PRODUCT CODE 1_4', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
-('Product', 'Product Categorization Info', 'PRODUCT LINE DESCRIPTION TEXT', 'N', 'Description of the high level product categories such as Life'),
-('Product', 'Product Categorization Info', 'PRODUCT LINE NAME', 'N', 'High Level Product categories such as Life'),
-('Product', 'Product Info', 'PRODUCT NAME', 'N', 'Name of the high level product that the product/component rolls up to'),
-('Product', 'Product Info', 'PRODUCT TYPE DESC', 'N', 'Provides a description of the product based on what was entered into the ADMI and Life70 Plan Code tables'),
-('Product', 'Product Categorization Info', 'PRODUCT TYPE DESCRIPTION TEXT', 'N', 'Provides a description of the product based on what was entered into the ADMI and Life70 Plan Code tables'),
-('Product', 'Product Info', 'SMOKING PRODUCT CODE', 'N', 'Smoking status of the policy holder. Derived from the plan/product type description in ADMI and Life70'),
-('Reinsurance', 'Identification', 'REINSURANCE AGREEMENT ID', 'N', 'Unique identifier for each reinsurance contract'),
-('Reinsurance', 'Counterparty Details', 'CEDING COMPANY NAME', 'N', 'Name of the primary insurer transferring risk to the reinsurer'),
-('Reinsurance', 'Counterparty Details', 'REINSURER NAME', 'N', 'Name of the reinsurer assuming the risk'),
-('Reinsurance', 'Contract Reference', 'POLICY NUMBER', 'N', 'Policy associated with the reinsurance coverage'),
-('Reinsurance', 'Contract Details', 'TREATY TYPE', 'N', 'Type of reinsurance agreement (e.g.'),
-('Reinsurance', 'Contract Details', 'EFFECTIVE DATE', 'N', 'Start date of the reinsurance coverage'),
-('Reinsurance', 'Contract Details', 'EXPIRY DATE', 'N', 'End date of the reinsurance coverage'),
-('Reinsurance', 'Financial Metrics', 'PREMIUM AMOUNT', 'N', 'Premium paid by ceding company to reinsurer'),
-('Reinsurance', 'Financial Metrics', 'COMMISSION / FEE', 'N', 'Reinsurer''s commission or fee structure for the agreement'),
-('Reinsurance', 'Contract Terms', 'COVERAGE LIMIT', 'N', 'Maximum liability amount the reinsurer will cover'),
-('Reinsurance', 'Contract Terms', 'RETENTION / CEDING %', 'N', 'Portion of risk retained by ceding company or transferred to reinsurer'),
-('Reinsurance', 'Claims Data', 'CLAIMS REPORTED', 'N', 'Claims submitted under the reinsurance agreement'),
-('Reinsurance', 'Claims Data', 'CLAIMS PAID', 'N', 'Claims paid by the reinsurer to the ceding company'),
-('Reinsurance', 'Financial Metrics', 'RECOVERABLES', 'N', 'Amount expected to be recovered from reinsurer for paid claims'),
-('Reinsurance', 'Performance Metrics', 'LOSS RATIO', 'N', 'Ratio of claims paid to premiums earned under the agreement'),
-('Reinsurance', 'Classification', 'RISK SEGMENT / LINE OF BUSINESS', 'N', 'Type of insurance risk covered (e.g.'),
-('Reinsurance', 'Assumptions', 'ACTUARIAL ASSUMPTIONS', 'N', 'Identifier for model output or reports used in reinsurance assessments'),
-('Reinsurance', 'Audit / Tracking', 'MODEL OUTPUT / REPORT ID', 'N', 'Manual adjustments or comments applied to reinsurance calculations'),
-('Reinsurance', 'Audit / Tracking', 'NOTES / ADJUSTMENTS', 'N', 'Reports required to meet regulatory obligations for reinsurance agreements'),
-('Reinsurance', 'Compliance Metrics', 'REGULATORY REPORTING REQUIREMENTS', 'N', 'Amount held by Client for each policy to cover for future benefit payouts'),
-('Reserve', 'Reserve', 'GAAP BENEFIT RESERVE AMOUNT', 'N', 'The date up to which the policy/contract is paid for'),
-('Reserve', 'Reserve', 'PAID TO DATE', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
-('Reserve', 'Entity Key Fields', 'PRODUCT CODE', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
-('Reserve', 'Reserve', 'STATUTORY RESERVE AMOUNT', 'N', 'Total amount of reserve held per policy as specified by statutory guidelines'),
-('Reserve', 'Reserve', 'TAX RESERVE AMOUNT', 'N', 'Amount held by Client for each policy to cover for future payouts'),
-('Reserve', 'Identification', 'RESERVE ID', 'N', 'Unique identifier for each reserve calculation or entry'),
-('Reserve', 'Policy Reference', 'POLICY NUMBER', 'N', 'Policy associated with the reserve calculation'),
-('Reserve', 'Policy Details', 'CONTRACT TYPE', 'N', 'Type of insurance contract (e.g.'),
-('Reserve', 'Policy Details', 'EFFECTIVE DATE', 'N', 'Date when the policy coverage or reserve calculation becomes effective'),
-('Reserve', 'Policy Details', 'EXPIRY DATE', 'N', 'Date when the policy coverage or reserve ends'),
-('Reserve', 'Calculation Details', 'VALUATION DATE', 'N', 'Date on which the reserve is calculated'),
-('Reserve', 'Financial Metrics', 'RESERVE AMOUNT', 'N', 'Calculated reserve amount to meet future obligations'),
-('Reserve', 'Calculation Details', 'ACTUARIAL METHOD', 'N', 'Method used for reserve calculation (e.g.'),
-('Reserve', 'Calculation Details', 'DISCOUNT RATE', 'N', 'Interest rate used in the present value calculation for reserves'),
-('Reserve', 'Assumptions', 'MORTALITY TABLE', 'N', 'Actuarial mortality table used in reserve calculations'),
-('Reserve', 'Assumptions', 'LAPSE ASSUMPTIONS', 'N', 'Assumptions on policy lapses used for reserve calculation'),
-('Reserve', 'Calculation Details', 'CASH FLOW PROJECTION', 'N', 'Expected future cash flows used in reserve computation'),
-('Reserve', 'Historical Data', 'CLAIM HISTORY', 'N', 'Historical claims data used to inform reserve calculations'),
-('Reserve', 'Reinsurance Details', 'REINSURANCE RECOVERABLES', 'N', 'Expected recoveries from reinsurance agreements'),
-('Reserve', 'Audit / Tracking', 'MODEL OUTPUT ID', 'N', 'Identifier for the actuarial model output used for reserve reporting'),
-('Reserve', 'Audit / Tracking', 'NOTES / ADJUSTMENTS', 'N', 'Manual adjustments or comments applied to reserve calculations'),
-('Reserve', 'Audit / Tracking', 'REPORTING PERIOD', 'N', 'The period for which the reserve is reported'),
-('Reserve', 'Compliance Metrics', 'REGULATORY RESERVE REQUIREMENT', 'N', 'Reserve amount required to meet regulatory obligations'),
-('Reserve', 'Compliance Metrics', 'ACTUARIAL SIGN-OFF', 'N', 'Confirmation by actuary that the reserve calculation is validated. Identifies the frequency of loan payment - monthly'),
-('Transactions', 'Transaction Details', 'PAYMENT MODE IDENTIFIER', 'N', 'Identifies the frequency of loan payment - monthly'),
-('Transactions', 'Transaction Details', 'PAYOUT AMOUNT', 'N', 'The contractual amount being received by the client'),
-('Transactions', 'Transaction Details', 'PAYOUT OPTION IDENTIFIER', 'N', 'Payout option selected e.g. lumpsum'),
-('Transactions', 'Transaction Details', 'PAYOUT STATUS IDENTIFIER', 'N', 'Indicates whether the payout contract has active payments or not. N = NOT PAYING P = PAYING (Standard)'),
-('Transactions', 'Policy Information', 'POLICY NUMBER', 'N', 'A unique identifier assigned to each life insurance policy'),
-('Transactions', 'Transaction Details', 'TRANSACTION ID', 'N', 'A system-generated unique identifier for each financial or non-financial transaction associated with a policy'),
-('Transactions', 'Transaction Details', 'TRANSACTION DATE', 'N', 'The date when the transaction was initiated'),
-('Transactions', 'Transaction Details', 'TRANSACTION TYPE', 'N', 'The category of transaction performed'),
-('Transactions', 'Financials', 'PREMIUM AMOUNT', 'N', 'The payment made by the policyholder for coverage under the life insurance policy for a given period'),
-('Transactions', 'Policy Information', 'COVERAGE EFFECTIVE DATE', 'N', 'The date from which the coverage or transaction (e.g.'),
-('Transactions', 'Policy Information', 'POLICY STATUS', 'N', 'The current status of the policy after the transaction'),
-('Transactions', 'Parties/Participants', 'BENEFICIARY INFORMATION', 'Y', 'Details of the designated beneficiaries associated with a policy'),
-('Transactions', 'Financials', 'CASH VALUE', 'N', 'The accumulated value of a permanent life insurance policy'),
-('Transactions', 'Financials', 'DEATH BENEFIT AMOUNT', 'N', 'The guaranteed amount payable to the beneficiary upon the insured''s death'),
-('Transactions', 'Financials', 'SURRENDER VALUE', 'N', 'The amount payable to the policyholder if the policy is voluntarily terminated before maturity or claim'),
-('Transactions', 'Financials', 'LOAN BALANCE', 'N', 'The outstanding balance of any loan taken against the policy''s cash value'),
-('Transactions', 'Transaction Details', 'PAYMENT METHOD', 'N', 'The mode of premium or transaction settlement'),
-('Transactions', 'Transaction Details', 'PROCESSING CHANNEL', 'N', 'The system'),
-('Underwriting', 'UW Info', 'UNDERWRITING DECISION REASON CODE', 'N', 'Provides the reason code for why an application is rejected'),
-('Underwriting', 'Identification', 'APPLICATION ID', 'N', 'Unique identifier assigned to each insurance application'),
-('Underwriting', 'Identification', 'POLICY NUMBER', 'N', 'Unique number assigned to the issued policy'),
-('Underwriting', 'Personal Information', 'APPLICANT NAME', 'Y', 'Full legal name of the applicant'),
-('Underwriting', 'Personal Information', 'DATE OF BIRTH', 'Y', 'Applicant''s date of birth'),
-('Underwriting', 'Personal Information', 'SOCIAL SECURITY NUMBER (SSN)', 'Y', 'Unique government-issued identifier for U.S. applicants'),
-('Underwriting', 'Personal Information', 'GENDER', 'Y', 'Gender of the applicant'),
-('Underwriting', 'Personal Information', 'MARITAL STATUS', 'Y', 'Marital status of the applicant'),
-('Underwriting', 'Contact Information', 'ADDRESS', 'Y', 'Residential address of the applicant'),
-('Underwriting', 'Contact Information', 'EMAIL', 'Y', 'Email address of the applicant'),
-('Underwriting', 'Contact Information', 'PHONE NUMBER', 'Y', 'Primary phone number of the applicant'),
-('Underwriting', 'Policy Details', 'PRODUCT TYPE', 'N', 'Type of insurance product applied for (e.g.'),
-('Underwriting', 'Policy Details', 'COVERAGE AMOUNT', 'N', 'Total coverage requested or approved in the policy'),
-('Underwriting', 'Risk Assessment', 'UNDERWRITING CLASS', 'N', 'Classification based on risk assessment (e.g.'),
-('Underwriting', 'Risk Assessment', 'MEDICAL HISTORY SUMMARY', 'Y', 'Key medical conditions or history affecting underwriting decision'),
-('Underwriting', 'Risk Assessment', 'HEIGHT', 'Y', 'Height of the applicant'),
-('Underwriting', 'Risk Assessment', 'WEIGHT', 'Y', 'Weight of the applicant'),
-('Underwriting', 'Risk Assessment', 'TOBACCO USE', 'Y', 'Indicates if the applicant uses tobacco products'),
-('Underwriting', 'Risk Assessment', 'HAZARDOUS OCCUPATION/ACTIVITY', 'N', 'Information about occupation or activities that increase risk'),
-('Underwriting', 'Policy Details', 'UNDERWRITING DECISION', 'N', 'Final decision by underwriters (e.g.'),
-('Underwriting', 'Policy Details', 'UNDERWRITER NOTES', 'N', 'Internal notes or comments from the underwriting review'),
-('Underwriting', 'Policy Details', 'PREMIUM AMOUNT', 'N', 'Approved premium for the policy based on underwriting and rating'),
-('Underwriting', 'Policy Details', 'EFFECTIVE DATE', 'N', 'Date the policy coverage begins'),
-('Underwriting', 'Policy Details', 'EXPIRY DATE', 'N', 'Date the policy coverage ends'),
-('Actuary', 'Customer_Master', 'Policyholder Name', 'Y', 'Full legal name of the insured individual or entity'),
-('Actuary', 'Customer_Demographics', 'Date of Birth', 'Y', 'Birth date of the policyholder'),
-('Actuary', 'Customer_Demographics', 'Gender', 'Y', 'Policyholder''s gender'),
-('Actuary', 'Customer_Location', 'Address / Postal Code', 'Y', 'Residential address or postal code for segmentation & compliance'),
-('Actuary', 'Policy_Master', 'Policy Number', 'N', 'Unique identifier assigned to an insurance contract'),
-('Actuary', 'Product_Catalog', 'Product Type', 'N', 'Insurance product category (e.g.'),
-('Actuary', 'Policy_Benefit', 'Coverage Amount / Sum Assured', 'N', 'Maximum benefit payable under the policy'),
-('Actuary', 'Policy_Financials', 'Premium Amount', 'N', 'Regular payment obligation of the policyholder'),
-('Actuary', 'Claims_Master', 'Claim ID', 'N', 'Unique identifier for claims lodged'),
-('Actuary', 'Claims_Cause', 'Cause of Claim / Diagnosis Code', 'Y', 'Reason for claim'),
-('Actuary', 'Claims_Financials', 'Claim Amount Paid', 'N', 'Final payout made to policyholder or beneficiary'),
-('Actuary', 'Actuarial_Reserves', 'Reserves', 'N', 'Liabilities set aside to cover future policyholder obligations'),
-('Actuary', 'Reinsurance', 'Reinsurance Recoverable', 'N', 'Portion of claims or reserves ceded to reinsurers'),
-('Actuary', 'Beneficiary_Master', 'Beneficiary Name', 'Y', 'Individual/entity designated to receive benefits'),
-('Actuary', 'Beneficiary_Details', 'Beneficiary Relationship', 'Y', 'Relation of beneficiary to policyholder (e.g.'),
-('Experience Study', 'Policy Information', 'Policy Number', 'N', 'Unique identifier assigned to an insurance policy'),
-('Experience Study', 'Policy Information', 'Contract Effective Date', 'N', 'The date when the insurance contract becomes effective. Type/category of insurance product (e.g.');
-
--- =========================================================
--- VERIFICATION
--- =========================================================
-
-SELECT 
-    'Total CDEs Loaded' as METRIC,
-    COUNT(*) as VALUE
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-
-UNION ALL
-
-SELECT 
-    'Unique Domains' as METRIC,
-    COUNT(DISTINCT DOMAIN) as VALUE
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-
-UNION ALL
-
-SELECT 
-    'PII Elements' as METRIC,
-    COUNT(*) as VALUE
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE AND IS_PII = 'Y'
-
-UNION ALL
-
-SELECT 
-    'Non-PII Elements' as METRIC,
-    COUNT(*) as VALUE
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE AND IS_PII = 'N';
-
--- =========================================================
--- DOMAIN BREAKDOWN
--- =========================================================
-
-SELECT 
-    DOMAIN,
-    COUNT(*) as CDE_COUNT,
-    SUM(CASE WHEN IS_PII = 'Y' THEN 1 ELSE 0 END) as PII_COUNT
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-GROUP BY DOMAIN
-ORDER BY CDE_COUNT DESC;
-
--- Expected Output: 271 CDEs across 15 domains
-
--- =========================================================
--- GENERATE PATTERN RULES FROM CDE_REFERENCE
--- Auto-generates ~800-1000 matching patterns
--- =========================================================
-
--- =========================================================
--- STEP 1: EXACT MATCHES (Priority 10)
--- =========================================================
--- One EXACT pattern per CDE for perfect matches
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT 
-    CDE_ID,
-    'EXACT' as PATTERN_TYPE,
-    ATTRIBUTE_LOGICAL_NAME as PATTERN_VALUE,
-    10 as PATTERN_PRIORITY
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE;
-
--- =========================================================
--- STEP 2: FULL CONTAINS (Priority 50)
--- =========================================================
--- Contains the full attribute name (lower priority fallback)
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT 
-    CDE_ID,
-    'CONTAINS' as PATTERN_TYPE,
-    ATTRIBUTE_LOGICAL_NAME as PATTERN_VALUE,
-    50 as PATTERN_PRIORITY
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE;
-
--- =========================================================
--- STEP 3: KEYWORD EXTRACTION (Priority 20-40)
--- =========================================================
--- Extract meaningful keywords from attribute names
--- Note: Skipping complex keyword extraction to avoid syntax issues
--- Using direct pattern matching instead (see STEP 4 below)
-
--- =========================================================
--- STEP 3A: HIGH-VALUE KEYWORDS (Priority 20)
--- =========================================================
--- PII and specific identifiers
-
--- General high-value keywords
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'DATE', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%DATE%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'AMOUNT', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%AMOUNT%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'NUMBER', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%NUMBER%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'NAME', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%NAME%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'ADDRESS', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%ADDRESS%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'EMAIL', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%EMAIL%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'PHONE', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%PHONE%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'ACCOUNT', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%ACCOUNT%';
-
--- =========================================================
--- STEP 3B: MEDIUM-VALUE KEYWORDS (Priority 30)
--- =========================================================
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'STATUS', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%STATUS%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'CODE', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%CODE%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'TYPE', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TYPE%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'RATE', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%RATE%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'PERCENT', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%PERCENT%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'VALUE', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%VALUE%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'EFFECTIVE', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%EFFECTIVE%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'ORIGINAL', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%ORIGINAL%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'CURRENT', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%CURRENT%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'TOTAL', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TOTAL%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'TRANSACTION', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TRANSACTION%';
-
--- =========================================================
--- STEP 4: COMMON ABBREVIATIONS (Priority 20)
--- =========================================================
-
--- SSN related
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'SSN', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND (UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%SSN%' 
-    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%SOCIAL%SECURITY%'
-    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TAX%ID%');
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'TAX_ID', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND (UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TAX%ID%' 
-    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TAXPAYER%');
-
--- DOB related
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'DOB', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND (UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%DOB%' 
-    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%DATE%BIRTH%'
-    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%BIRTH%DATE%');
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'BIRTHDATE', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%BIRTH%DATE%';
-
--- Claim related
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'CLAIM', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND DOMAIN = 'Claims';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'LOSS', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND DOMAIN = 'Claims'
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%LOSS%';
-
--- Policy related
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'POLICY', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND (DOMAIN = 'Policy' OR DOMAIN = 'Coverage/Rider');
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'PREMIUM', 20
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%PREMIUM%';
-
--- Fund related
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'FUND', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND DOMAIN = 'Investment Funds';
-
--- Producer/Agent related
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'PRODUCER', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND DOMAIN = 'Financial Professional';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'CONTAINS', 'COMMISSION', 30
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND DOMAIN = 'Financial Professional'
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%COMMISSION%';
-
--- =========================================================
--- STEP 5: POSITIONAL PATTERNS (Priority 40)
--- =========================================================
-
--- STARTS_WITH patterns for common prefixes
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'CLAIM', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'CLAIM%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'POLICY', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'POLICY%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'FUND', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'FUND%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'PRODUCER', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'PRODUCER%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'BENEFICIARY', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'BENEFICIARY%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'APPLICANT', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'APPLICANT%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'INSURED', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'INSURED%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'PREMIUM', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'PREMIUM%';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'STARTS_WITH', 'COMPONENT', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'COMPONENT%';
-
--- ENDS_WITH patterns for common suffixes
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'DATE', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%DATE';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'AMOUNT', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%AMOUNT';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'CODE', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%CODE';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'NUMBER', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%NUMBER';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'NAME', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%NAME';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'PERCENT', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%PERCENT';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'RATE', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%RATE';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'STATUS', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%STATUS';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'TYPE', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TYPE';
-
-INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
-SELECT CDE_ID, 'ENDS_WITH', 'ID', 40
-FROM CDE_REFERENCE
-WHERE IS_ACTIVE = TRUE
-  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%ID';
-
--- =========================================================
--- VERIFICATION
--- =========================================================
-
-SELECT 
-    'Total Patterns Generated' as METRIC,
-    COUNT(*) as VALUE
-FROM CDE_PATTERN_RULES
-WHERE IS_ACTIVE = TRUE
-
-UNION ALL
-
-SELECT 
-    'Unique CDEs Covered' as METRIC,
-    COUNT(DISTINCT CDE_ID) as VALUE
-FROM CDE_PATTERN_RULES
-WHERE IS_ACTIVE = TRUE
-
-UNION ALL
-
-SELECT 
-    'Avg Patterns per CDE' as METRIC,
-    ROUND(COUNT(*) * 1.0 / COUNT(DISTINCT CDE_ID), 2) as VALUE
-FROM CDE_PATTERN_RULES
-WHERE IS_ACTIVE = TRUE;
-
--- Pattern breakdown by type
-SELECT 
-    PATTERN_TYPE,
-    COUNT(*) as COUNT,
-    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 2) as PERCENTAGE
-FROM CDE_PATTERN_RULES
-WHERE IS_ACTIVE = TRUE
-GROUP BY PATTERN_TYPE
-ORDER BY COUNT DESC;
-
--- Pattern breakdown by priority
-SELECT 
-    PATTERN_PRIORITY,
-    COUNT(*) as COUNT,
-    CASE 
-        WHEN PATTERN_PRIORITY = 10 THEN 'Exact (100%)'
-        WHEN PATTERN_PRIORITY = 20 THEN 'Specific Keywords (80%)'
-        WHEN PATTERN_PRIORITY = 30 THEN 'Generic Keywords (70%)'
-        WHEN PATTERN_PRIORITY = 40 THEN 'Positional (70%)'
-        WHEN PATTERN_PRIORITY = 50 THEN 'Broad Match (60%)'
-        ELSE 'Other'
-    END as CONFIDENCE_LEVEL
-FROM CDE_PATTERN_RULES
-WHERE IS_ACTIVE = TRUE
-GROUP BY PATTERN_PRIORITY
-ORDER BY PATTERN_PRIORITY;
-
--- Expected Output:
--- Total Patterns: ~800-1000
--- CDEs Covered: 271
--- Avg Patterns per CDE: 3-4
-
-
--- ========================================
--- AUDIT & SYSTEM COLUMN EXCLUSION LIST
--- ========================================
--- Add this table to filter out common audit/system columns
-
-CREATE TABLE IF NOT EXISTS CDE_EXCLUSION_PATTERNS (
-    EXCLUSION_ID NUMBER AUTOINCREMENT,
-    EXCLUSION_TYPE VARCHAR(50),
-    EXCLUSION_VALUE VARCHAR(500),
-    EXCLUSION_REASON TEXT,
-    IS_ACTIVE BOOLEAN DEFAULT TRUE,
-    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
-    PRIMARY KEY (EXCLUSION_ID)
-);
-
--- ========================================
--- INSERT COMMON AUDIT COLUMNS
--- ========================================
-
--- Timestamp audit columns
-INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
-('EXACT', 'CREATED_AT', 'Standard audit timestamp'),
-('EXACT', 'UPDATED_AT', 'Standard audit timestamp'),
-('EXACT', 'MODIFIED_AT', 'Standard audit timestamp'),
-('EXACT', 'DELETED_AT', 'Soft delete timestamp'),
-('EXACT', 'CREATED_DATE', 'Standard audit timestamp'),
-('EXACT', 'UPDATED_DATE', 'Standard audit timestamp'),
-('EXACT', 'MODIFIED_DATE', 'Standard audit timestamp'),
-('EXACT', 'DELETED_DATE', 'Soft delete timestamp'),
-('EXACT', 'CREATE_DATE', 'Standard audit timestamp'),
-('EXACT', 'UPDATE_DATE', 'Standard audit timestamp'),
-('EXACT', 'INSERT_DATE', 'Standard audit timestamp'),
-('EXACT', 'LOAD_DATE', 'ETL timestamp'),
-('EXACT', 'LOAD_TIMESTAMP', 'ETL timestamp'),
-('EXACT', 'INSERT_TIMESTAMP', 'ETL timestamp'),
-('EXACT', 'CREATE_TIMESTAMP', 'Standard audit timestamp'),
-('EXACT', 'UPDATE_TIMESTAMP', 'Standard audit timestamp'),
-('EXACT', 'LAST_MODIFIED', 'Standard audit timestamp'),
-('EXACT', 'LAST_UPDATED', 'Standard audit timestamp'),
-('EXACT', 'RECORD_CREATED', 'Standard audit timestamp'),
-('EXACT', 'RECORD_UPDATED', 'Standard audit timestamp');
-
--- User audit columns
-INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
-('EXACT', 'CREATED_BY', 'Standard audit user'),
-('EXACT', 'UPDATED_BY', 'Standard audit user'),
-('EXACT', 'MODIFIED_BY', 'Standard audit user'),
-('EXACT', 'DELETED_BY', 'Soft delete user'),
-('EXACT', 'CREATE_USER', 'Standard audit user'),
-('EXACT', 'UPDATE_USER', 'Standard audit user'),
-('EXACT', 'INSERT_USER', 'ETL user'),
-('EXACT', 'LOAD_USER', 'ETL user'),
-('EXACT', 'LAST_MODIFIED_BY', 'Standard audit user'),
-('EXACT', 'LAST_UPDATED_BY', 'Standard audit user'),
-('EXACT', 'RECORD_CREATED_BY', 'Standard audit user'),
-('EXACT', 'RECORD_UPDATED_BY', 'Standard audit user');
-
--- System/technical columns
-INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
-('EXACT', 'RECORD_ID', 'Generic system ID'),
-('EXACT', 'ROW_ID', 'Generic system ID'),
-('EXACT', 'ID', 'Generic system ID'),
-('EXACT', 'VERSION', 'Version control'),
-('EXACT', 'VERSION_NUMBER', 'Version control'),
-('EXACT', 'IS_ACTIVE', 'Soft delete flag'),
-('EXACT', 'IS_DELETED', 'Soft delete flag'),
-('EXACT', 'ACTIVE_FLAG', 'Soft delete flag'),
-('EXACT', 'DELETE_FLAG', 'Soft delete flag'),
-('EXACT', 'DELETED', 'Soft delete flag'),
-('EXACT', 'ETL_BATCH_ID', 'ETL metadata'),
-('EXACT', 'BATCH_ID', 'ETL metadata'),
-('EXACT', 'SOURCE_SYSTEM', 'ETL metadata'),
-('EXACT', 'SOURCE_FILE', 'ETL metadata'),
-('EXACT', 'LOAD_ID', 'ETL metadata'),
-('EXACT', 'PROCESS_ID', 'ETL metadata'),
-('EXACT', 'JOB_ID', 'ETL metadata'),
-('EXACT', 'RUN_ID', 'ETL metadata');
-
--- Hash/checksum columns
-INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
-('EXACT', 'HASH', 'Technical hash'),
-('EXACT', 'CHECKSUM', 'Technical checksum'),
-('EXACT', 'ROW_HASH', 'Technical hash'),
-('EXACT', 'RECORD_HASH', 'Technical hash'),
-('EXACT', 'MD5_HASH', 'Technical hash'),
-('EXACT', 'SHA_HASH', 'Technical hash');
-
--- Sequence columns
-INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
-('EXACT', 'SEQ', 'Sequence number'),
-('EXACT', 'SEQUENCE', 'Sequence number'),
-('EXACT', 'SEQ_NUM', 'Sequence number'),
-('EXACT', 'SEQUENCE_NUMBER', 'Sequence number'),
-('EXACT', 'ROW_NUM', 'Row number'),
-('EXACT', 'ROW_NUMBER', 'Row number');
-
--- Pattern-based exclusions (use carefully)
-INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
-('ENDS_WITH', '_ID', 'Generic ID columns (too broad - review needed)'),
-('ENDS_WITH', '_KEY', 'Generic key columns'),
-('ENDS_WITH', '_HASH', 'Hash columns'),
-('ENDS_WITH', '_CHECKSUM', 'Checksum columns'),
-('STARTS_WITH', 'SYS_', 'System columns'),
-('STARTS_WITH', 'ETL_', 'ETL columns'),
-('CONTAINS', '_VERSION', 'Version columns');
-
--- ========================================
--- VERIFICATION QUERY
--- ========================================
-SELECT 
-    EXCLUSION_TYPE,
-    COUNT(*) as COUNT
-FROM CDE_EXCLUSION_PATTERNS
-WHERE IS_ACTIVE = TRUE
-GROUP BY EXCLUSION_TYPE
-ORDER BY EXCLUSION_TYPE;
-
--- Expected output:
--- CONTAINS     : ~1-5
--- ENDS_WITH    : ~5-10
--- EXACT        : ~50-60
--- STARTS_WITH  : ~2-5
-
--- ========================================
--- VIEW ALL EXCLUSIONS
--- ========================================
-SELECT 
-    EXCLUSION_TYPE,
-    EXCLUSION_VALUE,
-    EXCLUSION_REASON
-FROM CDE_EXCLUSION_PATTERNS
-WHERE IS_ACTIVE = TRUE
-ORDER BY 
-    CASE EXCLUSION_TYPE
-        WHEN 'EXACT' THEN 1
-        WHEN 'STARTS_WITH' THEN 2
-        WHEN 'ENDS_WITH' THEN 3
-        WHEN 'CONTAINS' THEN 4
-        ELSE 5
-    END,
-    EXCLUSION_VALUE;
-
-
-
 import streamlit as st
 import pandas as pd
 import snowflake.snowpark as snowpark
@@ -1298,10 +193,10 @@ def generate_definition(attribute_name, domain, tag):
         return f"Error generating definition: {str(e)}"
 
 def semantic_column_match(column_name, cde_list, context=""):
-    """Find semantic matches using Cortex"""
+    """Find semantic matches using Cortex with strict validation"""
     cde_sample = cde_list[:20]  # Limit for token size
     
-    prompt = f"""You are a data matching expert. 
+    prompt = f"""You are a STRICT data matching expert. Avoid false positives.
     
     Column to match: "{column_name}"
     Context: {context}
@@ -1309,11 +204,20 @@ def semantic_column_match(column_name, cde_list, context=""):
     Available CDEs:
     {chr(10).join([f"- {cde}" for cde in cde_sample])}
     
-    Task: Find the BEST semantic match from the list above.
+    STRICT MATCHING RULES:
+    - Only match if column and CDE have SAME semantic meaning
+    - Generic word overlap is NOT enough (HEATING_TYPE ≠ CLAIM_TYPE)
+    - Domain must match (actuarial ≠ claims)
+    - Context matters (EFFECTIVE_DATE ≠ CLAIM_DATE_OF_LOSS)
+    
+    WRONG matches to avoid:
+    - Different rate types (LAPSE_RATE ≠ COMMISSION_RATE)
+    - Different date types (CONTRACT_DATE ≠ LOSS_DATE)
+    - Different domains (property columns ≠ insurance CDEs)
     
     Return ONLY:
-    - The matched CDE name if similar (confidence > 70%)
-    - "NONE" if no good match
+    - The matched CDE name if TRULY similar (confidence > 85%)
+    - "NONE" if no strong match
     
     No explanation, just the answer.
     """
@@ -1326,8 +230,8 @@ def semantic_column_match(column_name, cde_list, context=""):
         return None
 
 def generate_intelligent_reasoning(column_name, table_name, matched_cde, definition, data_type, is_pii):
-    """Generate intelligent match reasoning using Cortex with context"""
-    prompt = f"""You are a data governance analyst. Explain this CDE match:
+    """Generate intelligent match reasoning using Cortex with strict validation"""
+    prompt = f"""You are a strict data governance analyst. Critically evaluate this CDE match:
     
     MATCH DETAILS:
     - Column: {column_name} (Type: {data_type})
@@ -1336,12 +240,22 @@ def generate_intelligent_reasoning(column_name, table_name, matched_cde, definit
     - Is PII: {is_pii}
     - Definition: {definition}
     
-    Provide analysis covering:
+    CRITICAL EVALUATION:
+    First, determine if this is a VALID match or FALSE POSITIVE.
+    
+    FALSE POSITIVE indicators:
+    - Generic words matching (e.g., HEATING_TYPE → CLAIM TYPE is WRONG)
+    - Domain mismatch (e.g., property data → claims domain is WRONG)
+    - Context mismatch (e.g., EFFECTIVE_DATE in actuarial → CLAIM DATE is WRONG)
+    - Similar but different meaning (e.g., LAPSE_RATE → COMMISSION_RATE is WRONG)
+    
+    If FALSE POSITIVE, start with: "⚠️ QUESTIONABLE MATCH"
+    If VALID match, provide:
     1. Why this is a match (1 sentence)
-    2. Data sensitivity and compliance concerns (1 sentence)
+    2. Data sensitivity (1 sentence)
     3. Recommended action (1 sentence)
     
-    Return as a single paragraph, professional tone, max 150 words.
+    Return single paragraph, professional tone, max 150 words.
     """
     
     try:
@@ -1410,23 +324,57 @@ def generate_scan_run_id():
 
 # Helper function to match patterns
 def match_pattern(column_name, pattern_type, pattern_value):
-    """Check if a column name matches a pattern"""
+    """Check if a column name matches a pattern with improved accuracy"""
     column_upper = column_name.upper()
     pattern_upper = pattern_value.upper()
     
     if pattern_type == 'EXACT':
         return column_upper == pattern_upper
+    
     elif pattern_type == 'CONTAINS':
-        return pattern_upper in column_upper
+        # Improved CONTAINS logic to avoid false positives
+        
+        # If pattern is very short (1-2 chars), require exact word match
+        if len(pattern_upper) <= 2:
+            # Use word boundary matching for short patterns
+            words = column_upper.replace('_', ' ').split()
+            return pattern_upper in words
+        
+        # For patterns 3 chars or longer, check if it's a meaningful substring
+        if pattern_upper in column_upper:
+            # Additional validation: avoid matching if pattern is just part of a longer word
+            # Example: Don't match "AGE" in "AGENT_CODE"
+            
+            # Find the position of the match
+            idx = column_upper.find(pattern_upper)
+            
+            # Check if pattern is surrounded by word boundaries (_, space, or string edges)
+            is_word_boundary_before = (idx == 0 or column_upper[idx - 1] in ['_', ' ', '-'])
+            is_word_boundary_after = (idx + len(pattern_upper) >= len(column_upper) or 
+                                     column_upper[idx + len(pattern_upper)] in ['_', ' ', '-'])
+            
+            # Pattern must be at word boundaries OR be 4+ characters long
+            if is_word_boundary_before and is_word_boundary_after:
+                return True
+            elif len(pattern_upper) >= 4:  # Longer patterns can match within words
+                return True
+            else:
+                return False
+        
+        return False
+    
     elif pattern_type == 'STARTS_WITH':
         return column_upper.startswith(pattern_upper)
+    
     elif pattern_type == 'ENDS_WITH':
         return column_upper.endswith(pattern_upper)
+    
     elif pattern_type == 'REGEX':
         try:
             return bool(re.search(pattern_upper, column_upper))
         except:
             return False
+    
     return False
 
 # Sidebar navigation
@@ -2175,7 +1123,14 @@ elif page == "📊 CDE Findings & Analysis":
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                filter_domain = st.multiselect("Domain", options=sorted(df_results['MATCHED_DOMAIN'].dropna().unique()), default=[])
+                # Get all domains from reference table for complete list
+                try:
+                    all_domains = session.sql("SELECT DISTINCT DOMAIN FROM CDE_REFERENCE WHERE IS_ACTIVE = TRUE ORDER BY DOMAIN").to_pandas()
+                    domain_options = all_domains['DOMAIN'].tolist() if len(all_domains) > 0 else sorted(df_results['MATCHED_DOMAIN'].dropna().unique())
+                except:
+                    domain_options = sorted(df_results['MATCHED_DOMAIN'].dropna().unique())
+                
+                filter_domain = st.multiselect("Domain", options=domain_options, default=[])
             with col2:
                 filter_pii = st.multiselect("PII Status", options=['Y', 'N'], default=[])
             with col3:
@@ -2200,8 +1155,130 @@ elif page == "📊 CDE Findings & Analysis":
             st.markdown("---")
             st.info(f"Showing **{len(filtered_df)}** of **{len(df_results)}** scan results")
             
+            # =========================================================
+            # QUESTIONABLE MATCHES SECTION (FALSE POSITIVE DETECTION)
+            # =========================================================
+            st.markdown("---")
+            st.markdown("### ⚠️ Questionable Matches (Potential False Positives)")
+            
+            # Detect questionable matches based on multiple criteria
+            questionable_df = filtered_df.copy()
+            
+            # Criteria for questionable matches:
+            questionable_conditions = []
+            
+            # 1. Generic single-word patterns
+            if 'PATTERN_VALUE' in questionable_df.columns:
+                generic_words = ['TYPE', 'DATE', 'RATE', 'CODE', 'NAME', 'NUMBER', 'STATUS', 
+                               'VALUE', 'AMOUNT', 'ID', 'PERCENT', 'TOTAL', 'AGE']
+                questionable_conditions.append(
+                    questionable_df['PATTERN_VALUE'].isin(generic_words)
+                )
+            
+            # 2. Low match scores
+            if 'MATCH_SCORE' in questionable_df.columns:
+                questionable_conditions.append(
+                    questionable_df['MATCH_SCORE'] < 70
+                )
+            
+            # 3. AI flagged as questionable
+            if 'MATCH_REASON' in questionable_df.columns:
+                questionable_conditions.append(
+                    questionable_df['MATCH_REASON'].str.contains('⚠️|QUESTIONABLE|FALSE POSITIVE', case=False, na=False)
+                )
+            
+            # 4. Short pattern values (likely false positives)
+            if 'PATTERN_VALUE' in questionable_df.columns:
+                questionable_conditions.append(
+                    (questionable_df['PATTERN_TYPE'] == 'CONTAINS') & 
+                    (questionable_df['PATTERN_VALUE'].str.len() <= 3)
+                )
+            
+            # 5. Domain mismatch indicators (property/actuarial → insurance)
+            questionable_conditions.append(
+                (questionable_df['TABLE_NAME'].str.contains('PROPERTY|ACTUARIAL|HEATING|BUILDING', case=False, na=False)) &
+                (questionable_df['MATCHED_DOMAIN'].isin(['Claims', 'Policy', 'Coverage/Rider']))
+            )
+            
+            # Combine all conditions (OR logic - any condition triggers questionable flag)
+            if questionable_conditions:
+                questionable_mask = questionable_conditions[0]
+                for condition in questionable_conditions[1:]:
+                    questionable_mask = questionable_mask | condition
+                
+                questionable_matches = questionable_df[questionable_mask].copy()
+            else:
+                questionable_matches = pd.DataFrame()
+            
+            # Display questionable matches
+            if len(questionable_matches) > 0:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.warning(f"⚠️ Found **{len(questionable_matches)}** questionable matches that may be false positives")
+                with col2:
+                    if st.button("🗑️ Delete All Questionable", type="secondary"):
+                        try:
+                            # Delete questionable matches from database
+                            scan_ids = questionable_matches['SCAN_ID'].tolist()
+                            scan_ids_str = ','.join([str(x) for x in scan_ids])
+                            
+                            delete_query = f"""
+                            DELETE FROM CDE_SCAN_RESULTS
+                            WHERE SCAN_ID IN ({scan_ids_str})
+                            """
+                            session.sql(delete_query).collect()
+                            st.success(f"✅ Deleted {len(questionable_matches)} questionable matches")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error deleting: {str(e)}")
+                
+                # Show questionable matches in expandable section
+                with st.expander(f"👁️ View {len(questionable_matches)} Questionable Matches", expanded=True):
+                    for idx, row in questionable_matches.head(50).iterrows():
+                        # Determine why it's questionable
+                        reasons = []
+                        if 'PATTERN_VALUE' in row and str(row['PATTERN_VALUE']) in ['TYPE', 'DATE', 'RATE', 'CODE', 'NAME', 'NUMBER', 'STATUS', 'VALUE', 'AMOUNT', 'ID', 'AGE']:
+                            reasons.append(f"Generic pattern: '{row['PATTERN_VALUE']}'")
+                        if 'MATCH_SCORE' in row and row['MATCH_SCORE'] < 70:
+                            reasons.append(f"Low score: {row['MATCH_SCORE']:.0f}%")
+                        if 'MATCH_REASON' in row and ('⚠️' in str(row['MATCH_REASON']) or 'QUESTIONABLE' in str(row['MATCH_REASON']).upper()):
+                            reasons.append("AI flagged")
+                        if 'PATTERN_VALUE' in row and 'PATTERN_TYPE' in row and row['PATTERN_TYPE'] == 'CONTAINS' and len(str(row['PATTERN_VALUE'])) <= 3:
+                            reasons.append(f"Short: '{row['PATTERN_VALUE']}'")
+                        if 'TABLE_NAME' in row and any(word in str(row['TABLE_NAME']).upper() for word in ['PROPERTY', 'ACTUARIAL', 'HEATING', 'BUILDING']):
+                            reasons.append("Domain mismatch")
+                        
+                        reason_text = " | ".join(reasons) if reasons else "Multiple indicators"
+                        
+                        col_a, col_b = st.columns([4, 1])
+                        with col_a:
+                            st.markdown(f"**⚠️ {row['TABLE_NAME']}.{row['COLUMN_NAME']} → {row['MATCHED_ATTRIBUTE_LOGICAL_NAME']}**")
+                            st.caption(f"🔍 {reason_text}")
+                        with col_b:
+                            if st.button("🗑️", key=f"del_{row['SCAN_ID']}", help="Delete this match"):
+                                try:
+                                    session.sql(f"DELETE FROM CDE_SCAN_RESULTS WHERE SCAN_ID = {row['SCAN_ID']}").collect()
+                                    st.success("✅")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ {str(e)[:50]}")
+                    
+                    if len(questionable_matches) > 50:
+                        st.info(f"Showing first 50 of {len(questionable_matches)} questionable matches")
+                
+                # Download questionable matches for review
+                st.download_button(
+                    label="📥 Download Questionable Matches",
+                    data=questionable_matches.to_csv(index=False),
+                    file_name=f"questionable_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.success("✅ No questionable matches detected! All results look good.")
+            
             # Display results
-            st.markdown("### 📋 Detailed Results")
+            st.markdown("---")
+            st.markdown("### 📋 All Scan Results")
             
             if len(filtered_df) > 0:
                 for idx, row in filtered_df.head(50).iterrows():
