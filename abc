@@ -1,350 +1,2374 @@
+-- =========================================================
+-- CDE MANAGEMENT SYSTEM - COMPLETE SQL SETUP (FROM SCRATCH)
+-- Data Source: PL_CriticalDataElements.csv (272 CDEs)
+-- =========================================================
+
+-- =========================================================
+-- STEP 1: DROP EXISTING TABLES (CLEAN START)
+-- =========================================================
+
+DROP TABLE IF EXISTS CDE_SCAN_RESULTS;
+DROP TABLE IF EXISTS CDE_PATTERN_RULES;
+DROP TABLE IF EXISTS CDE_AUDIT_LOG;
+DROP TABLE IF EXISTS CDE_EXCLUSION_PATTERNS;
+DROP TABLE IF EXISTS CDE_REFERENCE;
+
+-- =========================================================
+-- STEP 2: CREATE CDE_REFERENCE TABLE
+-- =========================================================
+
+CREATE TABLE CDE_REFERENCE (
+    CDE_ID NUMBER AUTOINCREMENT,
+    DOMAIN VARCHAR(200),
+    TAG VARCHAR(200),
+    ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
+    IS_PII VARCHAR(1),
+    DEFINITION TEXT,
+    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    UPDATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    IS_ACTIVE BOOLEAN DEFAULT TRUE,
+    PRIMARY KEY (CDE_ID)
+);
+
+-- =========================================================
+-- STEP 3: CREATE CDE_PATTERN_RULES TABLE
+-- =========================================================
+
+CREATE TABLE CDE_PATTERN_RULES (
+    PATTERN_ID NUMBER AUTOINCREMENT,
+    CDE_ID NUMBER NOT NULL,
+    PATTERN_TYPE VARCHAR(50) NOT NULL,
+    PATTERN_VALUE VARCHAR(500) NOT NULL,
+    PATTERN_PRIORITY NUMBER(3) NOT NULL,
+    IS_ACTIVE BOOLEAN DEFAULT TRUE,
+    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    PRIMARY KEY (PATTERN_ID)
+);
+
+-- =========================================================
+-- STEP 4: CREATE CDE_SCAN_RESULTS TABLE
+-- =========================================================
+
+CREATE TABLE CDE_SCAN_RESULTS (
+    SCAN_ID NUMBER AUTOINCREMENT,
+    SCAN_RUN_ID VARCHAR(100),
+    SCAN_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    SCAN_USER VARCHAR(100) DEFAULT CURRENT_USER(),
+    DATABASE_NAME VARCHAR(200),
+    SCHEMA_NAME VARCHAR(200),
+    TABLE_NAME VARCHAR(200),
+    COLUMN_NAME VARCHAR(200),
+    DATA_TYPE VARCHAR(100),
+    MATCHED_CDE_ID NUMBER,
+    MATCHED_DOMAIN VARCHAR(200),
+    MATCHED_TAG VARCHAR(200),
+    MATCHED_ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
+    MATCHED_IS_PII VARCHAR(1),
+    MATCHED_DEFINITION TEXT,
+    PATTERN_ID NUMBER,
+    PATTERN_TYPE VARCHAR(50),
+    PATTERN_VALUE VARCHAR(500),
+    MATCH_SCORE NUMBER(5,2),
+    MATCH_REASON VARCHAR(2000),
+    MATCH_METHOD VARCHAR(50),
+    AI_VALIDATED BOOLEAN,
+    IS_REVIEWED BOOLEAN DEFAULT FALSE,
+    REVIEW_STATUS VARCHAR(50),
+    REVIEW_NOTES TEXT,
+    REVIEWED_BY VARCHAR(100),
+    REVIEWED_DATE TIMESTAMP_NTZ,
+    PRIMARY KEY (SCAN_ID)
+);
+
+-- =========================================================
+-- STEP 5: CREATE CDE_AUDIT_LOG TABLE
+-- =========================================================
+
+CREATE TABLE CDE_AUDIT_LOG (
+    AUDIT_ID NUMBER AUTOINCREMENT,
+    TABLE_NAME VARCHAR(100),
+    OPERATION_TYPE VARCHAR(50),
+    RECORD_ID NUMBER,
+    OLD_VALUE TEXT,
+    NEW_VALUE TEXT,
+    CHANGED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    CHANGED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (AUDIT_ID)
+);
+
+-- =========================================================
+-- STEP 6: CREATE CDE_EXCLUSION_PATTERNS TABLE
+-- =========================================================
+
+CREATE TABLE CDE_EXCLUSION_PATTERNS (
+    EXCLUSION_ID NUMBER AUTOINCREMENT,
+    EXCLUSION_TYPE VARCHAR(50),
+    EXCLUSION_VALUE VARCHAR(500),
+    EXCLUSION_REASON TEXT,
+    IS_ACTIVE BOOLEAN DEFAULT TRUE,
+    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    PRIMARY KEY (EXCLUSION_ID)
+);
+
+-- =========================================================
+-- STEP 7: CREATE REPORTING VIEWS
+-- =========================================================
+
+-- View 1: Latest scan results per column
+CREATE OR REPLACE VIEW VW_CDE_LATEST_SCAN AS
+SELECT 
+    s.*,
+    ROW_NUMBER() OVER (
+        PARTITION BY s.DATABASE_NAME, s.SCHEMA_NAME, s.TABLE_NAME, s.COLUMN_NAME 
+        ORDER BY s.SCAN_DATE DESC
+    ) as RN
+FROM CDE_SCAN_RESULTS s
+QUALIFY RN = 1;
+
+-- View 2: PII elements summary
+CREATE OR REPLACE VIEW VW_CDE_PII_ELEMENTS AS
+SELECT 
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    TABLE_NAME,
+    COLUMN_NAME,
+    MATCHED_ATTRIBUTE_LOGICAL_NAME,
+    MATCHED_DOMAIN,
+    SCAN_DATE
+FROM CDE_SCAN_RESULTS
+WHERE MATCHED_IS_PII = 'Y'
+ORDER BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME;
+
+-- View 3: CDE summary by domain
+CREATE OR REPLACE VIEW VW_CDE_SUMMARY_BY_DOMAIN AS
+SELECT 
+    MATCHED_DOMAIN,
+    COUNT(DISTINCT MATCHED_CDE_ID) as UNIQUE_CDES,
+    COUNT(*) as TOTAL_MATCHES,
+    SUM(CASE WHEN MATCHED_IS_PII = 'Y' THEN 1 ELSE 0 END) as PII_COUNT,
+    COUNT(DISTINCT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TABLE_NAME) as TABLES_AFFECTED
+FROM CDE_SCAN_RESULTS
+GROUP BY MATCHED_DOMAIN
+ORDER BY TOTAL_MATCHES DESC;
+
+-- View 4: CDE summary by schema
+CREATE OR REPLACE VIEW VW_CDE_SUMMARY_BY_SCHEMA AS
+SELECT 
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    COUNT(DISTINCT TABLE_NAME) as TABLES_WITH_CDES,
+    COUNT(DISTINCT COLUMN_NAME) as CDE_COLUMNS,
+    SUM(CASE WHEN MATCHED_IS_PII = 'Y' THEN 1 ELSE 0 END) as PII_COLUMNS,
+    MAX(SCAN_DATE) as LAST_SCAN_DATE
+FROM CDE_SCAN_RESULTS
+GROUP BY DATABASE_NAME, SCHEMA_NAME
+ORDER BY PII_COLUMNS DESC, CDE_COLUMNS DESC;
+
+-- View 5: Unreviewed matches
+CREATE OR REPLACE VIEW VW_CDE_UNREVIEWED_MATCHES AS
+SELECT 
+    SCAN_ID,
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    TABLE_NAME,
+    COLUMN_NAME,
+    MATCHED_ATTRIBUTE_LOGICAL_NAME,
+    MATCHED_IS_PII,
+    MATCH_SCORE,
+    SCAN_DATE
+FROM CDE_SCAN_RESULTS
+WHERE IS_REVIEWED = FALSE
+ORDER BY MATCHED_IS_PII DESC, SCAN_DATE DESC;
+
+-- =========================================================
+-- VERIFICATION
+-- =========================================================
+
+SELECT 'Tables Created' as STATUS, COUNT(*) as COUNT
+FROM INFORMATION_SCHEMA.TABLES 
+WHERE TABLE_NAME IN ('CDE_REFERENCE', 'CDE_PATTERN_RULES', 'CDE_SCAN_RESULTS', 
+                     'CDE_AUDIT_LOG', 'CDE_EXCLUSION_PATTERNS')
+
+UNION ALL
+
+SELECT 'Views Created' as STATUS, COUNT(*) as COUNT
+FROM INFORMATION_SCHEMA.VIEWS
+WHERE TABLE_NAME LIKE 'VW_CDE_%';
+
+-- Expected Output:
+-- Tables Created: 5
+-- Views Created: 5
+
+
+
+-- =========================================================
+-- LOAD CDE REFERENCE DATA FROM CSV
+-- Source: PL_CriticalDataElements.csv (271 CDEs)
+-- =========================================================
+
+INSERT INTO CDE_REFERENCE (DOMAIN, TAG, ATTRIBUTE_LOGICAL_NAME, IS_PII, DEFINITION)
+VALUES
+('Claims', 'Event Details', 'CLAIM DATE OF LOSS', 'N', 'Actual date when the loss/claim happened'),
+('Claims', 'Financial Metrics', 'CLAIM PAID AMOUNT', 'N', 'Total claim amount to be paid to the beneficiaries'),
+('Claims', 'Financial Metrics', 'CLAIM PAID DATE', 'N', 'Date when the funds were released from claim to pay to the beneficiaries'),
+('Claims', 'Status / Workflow', 'CLAIM STATUS CHANGE DATE', 'N', 'Last claim status change date'),
+('Claims', 'Status / Workflow', 'CLAIM STATUS CODE', 'N', 'Current status of the claim such as in progress'),
+('Claims', 'Status / Workflow', 'CLAIM STATUS REASON CODE', 'N', 'Beneficiaries verified etc.'),
+('Claims', 'Claims Info', 'DEATH CERTIFICATE CERTIFIED DATE', 'N', 'Date of death as recorded in the death certificate if applicable to a claim'),
+('Claims', 'Event Details', 'LOSS REPORT DATE', 'N', 'Date when loss/claim was reported to the insurance carrier'),
+('Claims', 'Event Details', 'CLAIM SUBMISSION DATE', 'N', 'Date when the claim was submitted to the insurer'),
+('Claims', 'Classification', 'CLAIM TYPE', 'N', 'Type of claim (e.g.'),
+('Claims', 'Financial Metrics', 'DEDUCTIBLE / CO-PAY AMOUNT', 'N', 'Amount to be borne by the insured before claim payment'),
+('Claims', 'Financial Metrics', 'REINSURANCE RECOVERABLES', 'N', 'Amount to be recovered from reinsurer for the claim'),
+('Claims', 'Financial Metrics', '[Premium/Payment Details]', 'N', 'This is the sum of all payments due in a policy year for fixed premium products including policy fee'),
+('Coverage/Rider', 'Premium Amounts', 'ANNUALIZED PREMIUM AMOUNT', 'N', 'The effective date is the date on which the legal obligation by the insurance company for the coverage is created'),
+('Coverage/Rider', 'Core Component Info', 'COMPONENT EFFECTIVE DATE', 'N', 'Last date when the contract component status changed'),
+('Coverage/Rider', 'Core Component Info', 'COMPONENT STATUS CHANGE DATE', 'N', 'Current status of this coverage on a policy (excludes supplemental benefits). Updated daily'),
+('Coverage/Rider', 'Core Component Info', 'COMPONENT STATUS CODE', 'N', 'The total value of premiums paid into the contract for the particular component'),
+('Coverage/Rider', 'Life Premium Info', 'COMPONENT TOTAL PREMIUM PAID AMOUNT', 'N', 'Current benefit amount of a life policy coverage/rider/current fund value or annuity fund'),
+('Coverage/Rider', 'Core Component Info', 'CURRENT COMPONENT VALUE AMOUNT', 'N', 'This is the dollar amount that the policy owner''s beneficiaries will receive upon the death of the insured'),
+('Coverage/Rider', 'Core Component Info', 'FACE AMOUNT', 'N', 'This is the dollar amount that the policy owner''s beneficiaries will receive upon the death of the insured. The face amount is the death benefit for term life policies'),
+('Coverage/Rider', 'Core Component Info', 'ORIGINAL COMPONENT VALUE AMOUNT', 'N', 'Original benefit amount of a life policy coverage/rider/original fund value of an annuity fund'),
+('Coverage/Rider', 'Life Premium Info', 'PAY UP DATE', 'N', 'The date through which the coverage (base coverage or rider) is paid up'),
+('Coverage/Rider', 'Entity Key Fields', 'PLAN CODE', 'N', 'Plan Code (otherwise known as product code) of coverage or benefit attached to a policy'),
+('Coverage/Rider', 'Core Component Info', 'POLICY EXHIBIT CODE', 'N', 'This column indicates how to process the face amount change. Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
+('Coverage/Rider', 'Policy Component', 'PRODUCT CODE', 'N', 'to help isolate different domain sets for the same reference lookup data. This source could be a system feed or just the system -- whatever granularity is necessary to uniquely identify the domain value set'),
+('Coverage/Rider', 'Entity Key Fields', 'SOURCE CODE', 'N', 'Unique number to identify the component(coverage/fund/provision/rider) from the source system'),
+('Coverage/Rider', 'Entity Key Fields', 'SOURCE COMPONENT NUMBER', 'N', 'Unique number to identify the component(coverage/fund/provision/rider) from the source system in combination with source code'),
+('Coverage/Rider', 'Entity Key Fields', 'SUBSTANDARD RATING TABLE NAME', 'N', 'Name of the rating table associated to a substandard rate/percentage'),
+('Finance/Accounting', 'Accounting Info', 'STATE IDENTIFIER', 'N', 'The two position alphabetic abbreviation for the state or province where the party resides'),
+('Financial Professional', 'Transaction Info', 'COMMISSION RATE SCHEDULE IDENTIFIER', 'N', 'Unique key/Code identifying the commission schedule attached to the transaction( if applicable)'),
+('Financial Professional', 'Transaction Info', 'COMMISSINABLE PREMIUM AMOUNT', 'N', 'Premium amount used for calculation of commissions (if applicable)'),
+('Financial Professional', 'Transaction Info', 'COMMISSION RATE PERCENT', 'N', 'Commission rate percentage used as per policy guidelines (if applicable)'),
+('Financial Professional', 'Employee Info', 'FULL NAME', 'N', 'Contains the official name of the producer including their first'),
+('Financial Professional', 'Producer Info', 'LAST NAME', 'N', 'The surname of a person provided for the application (Standard)'),
+('Financial Professional', 'Entity Key Fields', 'PRODUCER HIERARCHY LEVEL', 'N', 'The position of a producer within the Kemper agency hierarchy (e.g. agency'),
+('Financial Professional', 'Producer Info', 'PRODUCER NIPR NUMBER', 'N', 'The agent''s National Insurance Producer Registry (NIPR) number. The date of the agent''s appointment with the company post to the verification of their license information'),
+('Financial Professional', 'Producer Info', 'PRODUCER PERMANENT APPOINTMENT DATE', 'N', 'Identifies the current active or inactive status of the agent'),
+('Financial Professional', 'Producer Info', 'PRODUCER STATUS CODE', 'N', 'The date of the agent''s termination date'),
+('Financial Professional', 'Producer Info', 'PRODUCER TERMINATION DATE', 'N', 'The date of the agent''s termination date'),
+('Financial Professional', 'Entity Key Fields', 'TRANSACTION AMOUNT', 'N', 'Gross Transaction Amount attached to the transaction'),
+('Investment Funds', 'Identification', 'FUND ID', 'N', 'Unique system-generated identifier assigned to each fund'),
+('Investment Funds', 'Fund Details', 'FUND NAME', 'N', 'Official name of the fund (e.g.'),
+('Investment Funds', 'Identification', 'FUND CODE', 'N', 'Internal or external code representing the fund'),
+('Investment Funds', 'Classification', 'FUND TYPE', 'N', 'Category/type of fund (e.g.'),
+('Investment Funds', 'Classification', 'FUND FAMILY', 'N', 'Group or family of funds to which the fund belongs'),
+('Investment Funds', 'Identification', 'CUSIP NUMBER', 'N', 'Unique 9-character alphanumeric identifier assigned to the fund security'),
+('Investment Funds', 'Identification', 'ISIN', 'N', 'International Securities Identification Number for the fund'),
+('Investment Funds', 'Identification', 'TICKER SYMBOL', 'N', 'Unique market symbol under which the fund trades'),
+('Investment Funds', 'Fund Details', 'FUND INCEPTION DATE', 'N', 'Date on which the fund was first established'),
+('Investment Funds', 'Fund Details', 'FUND CURRENCY', 'N', 'Currency in which the fund is denominated and reported'),
+('Investment Funds', 'Financials', 'NET ASSET VALUE (NAV)', 'N', 'The per-unit market value of the fund'),
+('Investment Funds', 'Financials', 'EXPENSE RATIO', 'N', 'The percentage of fund assets used to cover operating expenses'),
+('Investment Funds', 'Financials', 'MANAGEMENT FEE', 'N', 'The fee charged by the fund manager for managing the fund'),
+('Investment Funds', 'Risk & Compliance', 'RISK CLASSIFICATION', 'N', 'Risk level of the fund (e.g.'),
+('Investment Funds', 'Performance', 'BENCHMARK INDEX', 'N', 'The index against which the fund''s performance is measured'),
+('Investment Funds', 'Fund Details', 'INVESTMENT OBJECTIVE', 'N', 'The stated purpose of the fund (e.g.'),
+('Investment Funds', 'Fund Details', 'ASSET ALLOCATION', 'N', 'Breakdown of investments across asset classes (e.g.'),
+('Investment Funds', 'Management', 'FUND MANAGER NAME', 'N', 'Name of the portfolio/fund manager responsible for managing the fund'),
+('Investment Funds', 'Management', 'FUND MANAGER ID', 'N', 'Unique identifier of the fund manager'),
+('Investment Funds', 'Compliance', 'REGULATORY REGISTRATION', 'N', 'Registration number of details with regulatory authorities (e.g.'),
+('Investment Funds', 'Operations', 'DISTRIBUTION CHANNEL', 'N', 'Channel through which the fund is sold (e.g.'),
+('New Business/ Application', 'Core_Issue', 'AGE', 'N', 'Age of party attached at COVERAGE issue for individual policies. Doesn''t apply for group policy'),
+('New Business/ Application', 'Core_Issue', 'BIRTH COUNTRY CODE', 'N', 'The country where the party was born'),
+('New Business/ Application', 'Core_Issue', 'BIRTH DATE', 'Y', 'The party''s date of birth (for individual policies) (Standard)'),
+('New Business/ Application', 'Core_Issue', 'BIRTH STATE CODE', 'N', 'State'),
+('New Business/ Application', 'Core_Issue', 'GENDER CODE', 'N', 'Gender Code of COVERAGE party at Policy COVERAGE issue; used for determining premium rates and rating class'),
+('New Business/ Application', 'Core_Issue', 'POLICY CURRENCY CODE', 'N', 'ISO currency code indicating the currently the transaction was carried on'),
+('New Business/ Application', 'Core_Issue', '[Product/Coverage Code]', 'N', 'Unique code provided by the source system to identify a coverage'),
+('New Business/ Application', 'Application_Info', 'PLAN CODE', 'N', 'Policy number/contract number from the source administrative system connected with the application or quote'),
+('New Business/ Application', 'Application_Info', 'POLICY NUMBER', 'N', 'Policy number/contract number from the source administrative system connected with the application or quote'),
+('New Business/ Application', 'Application_Info', 'QUOTED PREMIUM MODE CODE', 'N', 'The quoted frequency of premium payment'),
+('New Business/ Application', 'Natural_Key', 'SOURCE CODE', 'N', 'A standard code to identify the data source for the ETL process and to help isolate different domain sets for the same reference lookup data. This source could be a system feed or just the system -- whatever granularity is necessary to uniquely identify the domain value set'),
+('New Business/ Application', 'Application Information', 'APPLICATION ID', 'N', 'A unique identifier assigned to each new insurance application to track its progress'),
+('New Business/ Application', 'Application Information', 'APPLICATION DATE', 'N', 'The date the insurance application was submitted by the applicant'),
+('New Business/ Application', 'Applicant / Parties', 'APPLICANT NAME', 'Y', 'The legal name of the person applying for the policy'),
+('New Business/ Application', 'Applicant / Parties', 'APPLICANT DOB', 'Y', 'Date of birth of the applicant'),
+('New Business/ Application', 'Applicant / Parties', 'APPLICANT SSN / TAX ID', 'Y', 'Social Security Number or Tax Identification Number provided for identification and regulatory compliance'),
+('New Business/ Application', 'Applicant / Parties', 'APPLICANT ADDRESS', 'Y', 'Residential or mailing address of the applicant'),
+('New Business/ Application', 'Applicant / Parties', 'APPLICANT CONTACT INFO', 'Y', 'Phone number(s) and email address of the applicant'),
+('New Business/ Application', 'Applicant / Parties', 'GENDER', 'Y', 'Gender of the applicant'),
+('New Business/ Application', 'Risk & Underwriting', 'SMOKING STATUS', 'N', 'Whether the applicant is a smoker or non-smoker'),
+('New Business/ Application', 'Risk & Underwriting', 'OCCUPATION', 'Y', 'Applicant''s job or profession'),
+('New Business/ Application', 'Financial Information', 'ANNUAL INCOME', 'Y', 'Applicant''s income level'),
+('New Business/ Application', 'Product Information', 'REQUESTED PRODUCT TYPE', 'N', 'Type of insurance product applied for (e.g.'),
+('New Business/ Application', 'Product Information', 'COVERAGE AMOUNT (FACE VALUE)', 'N', 'The benefit amount requested in the application'),
+('New Business/ Application', 'Financial Information', 'PREMIUM MODE & AMOUNT', 'N', 'Frequency (monthly'),
+('New Business/ Application', 'Intermediary / Producer', 'AGENT / PRODUCER ID', 'N', 'Identifier for the licensed agent or producer submitting the application'),
+('New Business/ Application', 'Intermediary / Producer', 'AGENT CONTACT INFORMATION', 'N', 'Contact details of the agent or producer associated with the application'),
+('New Business/ Application', 'Risk & Underwriting', 'UNDERWRITING DECISION', 'N', 'Outcome of the underwriting review (e.g.'),
+('New Business/ Application', 'Policy Information', 'POLICY EFFECTIVE DATE', 'N', 'The date when coverage under the policy will begin if the application is approved'),
+('Policy', 'Policy Holder Values', 'ACCOUNT VALUE AMOUNT', 'N', 'UL & Ann PH Acct Bal reported on GAAP Bal Sht is adjusted for accrued interest (added) & pending claims (subtracted)'),
+('Policy', 'Life Billing Info', 'BILLING MODE CODE', 'N', 'Identifies the current frequency of incoming payments: AN = Annual'),
+('Policy', 'Policy Holder Values', 'CASH VALUE AMOUNT', 'N', 'Contract to cash surrender value. Also called inside build-up and policy owner''s equity'),
+('Policy', 'Life Billing Info', 'COMMISSION OVERRIDE CODE', 'N', 'Source administrative system''s override code if there is a commission override on this policy. (Note that this is an indicator for an override or non-payment of a commission amount'),
+('Policy', 'Core Issue Info', 'CONTESTABILITY END DATE', 'N', 'The end date of the period of time (two years) during which an insurer may challenge the validity of a life insurance policy'),
+('Policy', 'Loan Info', 'CUMMULATIVE INTEREST AMOUNT', 'N', 'Cumulative Interest accrued since the origination of the loan'),
+('Policy', 'Loan Info', 'CUMMULATIVE INTEREST AMOUNT', 'N', 'Cumulative Interest accrued since the origination of the loan'),
+('Policy', 'Loan Info', 'EFFECTIVE DATE', 'N', 'Indicates the date on which the legal obligation by the insurance company is created'),
+('Policy', 'Core Issue Info', 'EFFECTIVE DATE', 'N', 'Indicates the date on which the legal obligation by the insurance company is created'),
+('Policy', 'Loan Info', 'GRACE PERIOD END DATE', 'N', 'the policy'),
+('Policy', 'Loan Info', 'INTEREST METHOD CODE', 'N', 'Defines the basis for calculating loan interest (in advance or in arrears)'),
+('Policy', 'Loan Info', 'INTEREST PAID TO DATE', 'N', 'The date the interest is paid to'),
+('Policy', 'Loan Info', 'INTEREST RATE', 'N', 'The interest rate of the loan'),
+('Policy', 'Core Issue Info', 'ISSUE DATE', 'N', 'The date when the insurance company approves and accepts the application'),
+('Policy', 'Life Billing Info', 'LAPSED DATE', 'N', 'The date the policy terminates for non-payment of premiums'),
+('Policy', 'Loan Info', 'LOAN INTEREST DUE AMOUNT', 'N', 'Amount of interest charged for current year'),
+('Policy', 'Loan Info', 'LOAN PRINCIPAL AMOUNT', 'N', 'Remaining Principal Amount on the loan'),
+('Policy', 'Loan Info', 'LOAN STATUS CODE', 'N', 'Indicates the status of the Loan (If there is a loan on a policy inforce = active'),
+('Policy', 'Entity Key Fields', 'LOAN TYPE', 'N', 'Identifies whether there is a loan or a lien on a policy'),
+('Policy', 'Premium Amounts', 'MODAL PREMIUM AMOUNT', 'N', 'The calculated premium amount due by every billing cycle based on the premium mode selected'),
+('Policy', 'Loan Info', 'ORIGINAL LOAN AMOUNT', 'N', 'The total amount of the loan at the time of issue'),
+('Policy', 'Life Billing Info', 'PAID TO DATE', 'N', 'This is the date the policy is paid to (Paid through date is one day prior to this day)'),
+('Policy', 'Loan Info', 'PAYMENT AMOUNT', 'N', 'The expected amount of each loan payment'),
+('Policy', 'Life Billing Info', 'PAYMENT DUE DATE', 'N', 'The date when the next payment is due'),
+('Policy', 'Loan Info', 'PAYMENT METHOD CODE', 'N', 'Indicates the approved method of payment on the policy/contract (check'),
+('Policy', 'Loan Info', 'PAYOFF BALANCE AMOUNT', 'N', 'The amount required to completely payoff the loan balance'),
+('Policy', 'Loan Info', 'PAYOFF BALANCE AS OF DATE', 'N', 'The date the payoff balance was last calculated'),
+('Policy', 'Status Info', 'POLICY STATUS CODE', 'N', 'A code that represents if a policy is in-force or not in-force (e.g.'),
+('Policy', 'Status Info', 'POLICY SUSPEND CODE', 'N', 'code that indicates the suspension of coverage occurs when an insurance company stops covering a policyholder'),
+('Policy', 'Assignment Info', 'PRODUCT CODE', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
+('Policy', 'Status Info', 'STATUS CHANGE DATE', 'N', 'The date when last policy/contract status change happened'),
+('Policy', 'Termination/Surrender', 'TERMINATION DATE', 'N', 'The date in which the company no longer has any obligation on the policy or riders'),
+('Policy', 'Entity Key Fields', 'WAIVER PREMIUM AMOUNT', 'N', 'Amount of premium that is waived in the current policy year if a policy is on a waiver of premium type benefit'),
+('Policy', 'Core_Issue_Info', 'ISSUE STATE CODE', 'N', 'State/territory/province where the application is signed'),
+('Policy', 'Status_Info', 'POLICY TERMINATION REASON CODE', 'N', 'Additional processing details that resulted in termination status of the policy'),
+('Policy', 'Premium_Amounts', 'PREMIUM ON DEPOSIT ACCRUED INTEREST AMOUNT', 'N', 'The accrued interest on the premium on deposit account for a contract'),
+('Policy', 'Policy', 'POLICY REJECTION REASON CODE', 'N', 'Code that indicates the reason that policy is rejected post Underwriting process. E.g. Medical'),
+('PolicyHolder/Party', 'Name Info', 'PREFIX TITLE NAME', 'N', 'A title or honorific added to the beginning of someone''s name (Mr'),
+('PolicyHolder/Party', 'Contact Info 1', 'STATE IDENTIFIER', 'Y', 'The two position alphabetic abbreviation for the state or province where the party resides'),
+('PolicyHolder/Party', 'Name Info', 'SUFFIX TITLE NAME', 'N', 'This is the first name of a person provided on the application. This field is not used with non-person entities (e.g. funeral homes)'),
+('PolicyHolder/Party', 'Identification', 'PARTY ID', 'N', 'Unique system-generated identifier assigned to a party (person or organization)'),
+('PolicyHolder/Party', 'Personal Details', 'FIRST NAME', 'Y', 'The given name of an individual party'),
+('PolicyHolder/Party', 'Personal Details', 'LAST NAME', 'Y', 'The family name or surname of an individual party'),
+('PolicyHolder/Party', 'Personal Details', 'MIDDLE NAME', 'Y', 'The additional given name(s) of an individual party'),
+('PolicyHolder/Party', 'Personal Details', 'FULL LEGAL NAME', 'Y', 'Complete legal name of the party (individual or organization)'),
+('PolicyHolder/Party', 'Demographics', 'DATE OF BIRTH', 'Y', 'The birth date of an individual party'),
+('PolicyHolder/Party', 'Demographics', 'GENDER', 'Y', 'The gender identity of an individual party'),
+('PolicyHolder/Party', 'Identification', 'SOCIAL SECURITY NUMBER', 'Y', 'Government-issued identification number used for tax and legal purposes'),
+('PolicyHolder/Party', 'Identification', 'TAX IDENTIFICATION NUMBER', 'Y', 'Unique identifier issued by a government authority for tax purposes'),
+('PolicyHolder/Party', 'Contact Details', 'ADDRESS LINE 1', 'Y', 'Primary street address information of the party'),
+('PolicyHolder/Party', 'Contact Details', 'ADDRESS LINE 2', 'Y', 'Additional address information of the party'),
+('PolicyHolder/Party', 'Contact Details', 'CITY', 'Y', 'The city portion of the party''s address'),
+('PolicyHolder/Party', 'Contact Details', 'STATE/PROVINCE', 'Y', 'The state or province portion of the party''s address'),
+('PolicyHolder/Party', 'Contact Details', 'COUNTRY', 'Y', 'The country of residence or registration of the party'),
+('PolicyHolder/Party', 'Contact Details', 'POSTAL CODE/ZIP', 'Y', 'Postal or ZIP code for mailing purposes'),
+('PolicyHolder/Party', 'Contact Details', 'PHONE NUMBER', 'Y', 'Primary telephone number for the party'),
+('PolicyHolder/Party', 'Contact Details', 'EMAIL ADDRESS', 'Y', 'Email address of the party'),
+('PolicyHolder/Party', 'Demographics', 'CITIZENSHIP', 'Y', 'The country of citizenship for the party'),
+('PolicyHolder/Party', 'Demographics', 'OCCUPATION', 'Y', 'Current or most recent occupation of the party'),
+('PolicyHolder/Party', 'Demographics', 'EMPLOYER NAME', 'N', 'Name of the organization employing the party'),
+('PolicyHolder/Party', 'Relationship', 'PARTY ROLE', 'N', 'The role the party plays in the business process (e.g.'),
+('PolicyHolder/Party', 'Relationship', 'RELATIONSHIP TO INSURED', 'N', 'The relationship between the party and the insured individual'),
+('PolicyHolder/Party', 'Demographics', 'MARITAL STATUS', 'N', 'Legal marital status of the individual party'),
+('Product', 'Product Info', 'BEGIN DATE', 'N', 'Date when product was released for selling'),
+('Product', 'Product Benefit Info', 'BENEFIT CHANGE', 'N', 'Indicates whether there has been a benefit change to the plan. Derived from the plan/product type description in ADMI and Life70'),
+('Product', 'Product Info', 'END DATE', 'N', 'Date when product for closed for sales'),
+('Product', 'Annuity Product Info', 'FREE WITHDRAWAL AMOUNT', 'N', 'The amount of money that is available for surrender without any surrender charges during annuity contract year (If applicable)'),
+('Product', 'Product Info', 'GI PRODUCT CODE', 'N', 'Indicates if Guarantee Issue plan; Yes (1) No (0). Derived from plan/product type description in ADMI and Life70'),
+('Product', 'Product Categorization Info', 'PRODUCT CLASS NAME', 'N', 'Product class name capturing different variations of the product in terms of provisions'),
+('Product', 'Entity Key Fields', 'PRODUCT CODE', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
+('Product', 'Product Info', 'PRODUCT CODE 1_4', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
+('Product', 'Product Categorization Info', 'PRODUCT LINE DESCRIPTION TEXT', 'N', 'Description of the high level product categories such as Life'),
+('Product', 'Product Categorization Info', 'PRODUCT LINE NAME', 'N', 'High Level Product categories such as Life'),
+('Product', 'Product Info', 'PRODUCT NAME', 'N', 'Name of the high level product that the product/component rolls up to'),
+('Product', 'Product Info', 'PRODUCT TYPE DESC', 'N', 'Provides a description of the product based on what was entered into the ADMI and Life70 Plan Code tables'),
+('Product', 'Product Categorization Info', 'PRODUCT TYPE DESCRIPTION TEXT', 'N', 'Provides a description of the product based on what was entered into the ADMI and Life70 Plan Code tables'),
+('Product', 'Product Info', 'SMOKING PRODUCT CODE', 'N', 'Smoking status of the policy holder. Derived from the plan/product type description in ADMI and Life70'),
+('Reinsurance', 'Identification', 'REINSURANCE AGREEMENT ID', 'N', 'Unique identifier for each reinsurance contract'),
+('Reinsurance', 'Counterparty Details', 'CEDING COMPANY NAME', 'N', 'Name of the primary insurer transferring risk to the reinsurer'),
+('Reinsurance', 'Counterparty Details', 'REINSURER NAME', 'N', 'Name of the reinsurer assuming the risk'),
+('Reinsurance', 'Contract Reference', 'POLICY NUMBER', 'N', 'Policy associated with the reinsurance coverage'),
+('Reinsurance', 'Contract Details', 'TREATY TYPE', 'N', 'Type of reinsurance agreement (e.g.'),
+('Reinsurance', 'Contract Details', 'EFFECTIVE DATE', 'N', 'Start date of the reinsurance coverage'),
+('Reinsurance', 'Contract Details', 'EXPIRY DATE', 'N', 'End date of the reinsurance coverage'),
+('Reinsurance', 'Financial Metrics', 'PREMIUM AMOUNT', 'N', 'Premium paid by ceding company to reinsurer'),
+('Reinsurance', 'Financial Metrics', 'COMMISSION / FEE', 'N', 'Reinsurer''s commission or fee structure for the agreement'),
+('Reinsurance', 'Contract Terms', 'COVERAGE LIMIT', 'N', 'Maximum liability amount the reinsurer will cover'),
+('Reinsurance', 'Contract Terms', 'RETENTION / CEDING %', 'N', 'Portion of risk retained by ceding company or transferred to reinsurer'),
+('Reinsurance', 'Claims Data', 'CLAIMS REPORTED', 'N', 'Claims submitted under the reinsurance agreement'),
+('Reinsurance', 'Claims Data', 'CLAIMS PAID', 'N', 'Claims paid by the reinsurer to the ceding company'),
+('Reinsurance', 'Financial Metrics', 'RECOVERABLES', 'N', 'Amount expected to be recovered from reinsurer for paid claims'),
+('Reinsurance', 'Performance Metrics', 'LOSS RATIO', 'N', 'Ratio of claims paid to premiums earned under the agreement'),
+('Reinsurance', 'Classification', 'RISK SEGMENT / LINE OF BUSINESS', 'N', 'Type of insurance risk covered (e.g.'),
+('Reinsurance', 'Assumptions', 'ACTUARIAL ASSUMPTIONS', 'N', 'Identifier for model output or reports used in reinsurance assessments'),
+('Reinsurance', 'Audit / Tracking', 'MODEL OUTPUT / REPORT ID', 'N', 'Manual adjustments or comments applied to reinsurance calculations'),
+('Reinsurance', 'Audit / Tracking', 'NOTES / ADJUSTMENTS', 'N', 'Reports required to meet regulatory obligations for reinsurance agreements'),
+('Reinsurance', 'Compliance Metrics', 'REGULATORY REPORTING REQUIREMENTS', 'N', 'Amount held by Client for each policy to cover for future benefit payouts'),
+('Reserve', 'Reserve', 'GAAP BENEFIT RESERVE AMOUNT', 'N', 'The date up to which the policy/contract is paid for'),
+('Reserve', 'Reserve', 'PAID TO DATE', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
+('Reserve', 'Entity Key Fields', 'PRODUCT CODE', 'N', 'Type of insurance at time of data extraction. Also referred to as "Plan Code."'),
+('Reserve', 'Reserve', 'STATUTORY RESERVE AMOUNT', 'N', 'Total amount of reserve held per policy as specified by statutory guidelines'),
+('Reserve', 'Reserve', 'TAX RESERVE AMOUNT', 'N', 'Amount held by Client for each policy to cover for future payouts'),
+('Reserve', 'Identification', 'RESERVE ID', 'N', 'Unique identifier for each reserve calculation or entry'),
+('Reserve', 'Policy Reference', 'POLICY NUMBER', 'N', 'Policy associated with the reserve calculation'),
+('Reserve', 'Policy Details', 'CONTRACT TYPE', 'N', 'Type of insurance contract (e.g.'),
+('Reserve', 'Policy Details', 'EFFECTIVE DATE', 'N', 'Date when the policy coverage or reserve calculation becomes effective'),
+('Reserve', 'Policy Details', 'EXPIRY DATE', 'N', 'Date when the policy coverage or reserve ends'),
+('Reserve', 'Calculation Details', 'VALUATION DATE', 'N', 'Date on which the reserve is calculated'),
+('Reserve', 'Financial Metrics', 'RESERVE AMOUNT', 'N', 'Calculated reserve amount to meet future obligations'),
+('Reserve', 'Calculation Details', 'ACTUARIAL METHOD', 'N', 'Method used for reserve calculation (e.g.'),
+('Reserve', 'Calculation Details', 'DISCOUNT RATE', 'N', 'Interest rate used in the present value calculation for reserves'),
+('Reserve', 'Assumptions', 'MORTALITY TABLE', 'N', 'Actuarial mortality table used in reserve calculations'),
+('Reserve', 'Assumptions', 'LAPSE ASSUMPTIONS', 'N', 'Assumptions on policy lapses used for reserve calculation'),
+('Reserve', 'Calculation Details', 'CASH FLOW PROJECTION', 'N', 'Expected future cash flows used in reserve computation'),
+('Reserve', 'Historical Data', 'CLAIM HISTORY', 'N', 'Historical claims data used to inform reserve calculations'),
+('Reserve', 'Reinsurance Details', 'REINSURANCE RECOVERABLES', 'N', 'Expected recoveries from reinsurance agreements'),
+('Reserve', 'Audit / Tracking', 'MODEL OUTPUT ID', 'N', 'Identifier for the actuarial model output used for reserve reporting'),
+('Reserve', 'Audit / Tracking', 'NOTES / ADJUSTMENTS', 'N', 'Manual adjustments or comments applied to reserve calculations'),
+('Reserve', 'Audit / Tracking', 'REPORTING PERIOD', 'N', 'The period for which the reserve is reported'),
+('Reserve', 'Compliance Metrics', 'REGULATORY RESERVE REQUIREMENT', 'N', 'Reserve amount required to meet regulatory obligations'),
+('Reserve', 'Compliance Metrics', 'ACTUARIAL SIGN-OFF', 'N', 'Confirmation by actuary that the reserve calculation is validated. Identifies the frequency of loan payment - monthly'),
+('Transactions', 'Transaction Details', 'PAYMENT MODE IDENTIFIER', 'N', 'Identifies the frequency of loan payment - monthly'),
+('Transactions', 'Transaction Details', 'PAYOUT AMOUNT', 'N', 'The contractual amount being received by the client'),
+('Transactions', 'Transaction Details', 'PAYOUT OPTION IDENTIFIER', 'N', 'Payout option selected e.g. lumpsum'),
+('Transactions', 'Transaction Details', 'PAYOUT STATUS IDENTIFIER', 'N', 'Indicates whether the payout contract has active payments or not. N = NOT PAYING P = PAYING (Standard)'),
+('Transactions', 'Policy Information', 'POLICY NUMBER', 'N', 'A unique identifier assigned to each life insurance policy'),
+('Transactions', 'Transaction Details', 'TRANSACTION ID', 'N', 'A system-generated unique identifier for each financial or non-financial transaction associated with a policy'),
+('Transactions', 'Transaction Details', 'TRANSACTION DATE', 'N', 'The date when the transaction was initiated'),
+('Transactions', 'Transaction Details', 'TRANSACTION TYPE', 'N', 'The category of transaction performed'),
+('Transactions', 'Financials', 'PREMIUM AMOUNT', 'N', 'The payment made by the policyholder for coverage under the life insurance policy for a given period'),
+('Transactions', 'Policy Information', 'COVERAGE EFFECTIVE DATE', 'N', 'The date from which the coverage or transaction (e.g.'),
+('Transactions', 'Policy Information', 'POLICY STATUS', 'N', 'The current status of the policy after the transaction'),
+('Transactions', 'Parties/Participants', 'BENEFICIARY INFORMATION', 'Y', 'Details of the designated beneficiaries associated with a policy'),
+('Transactions', 'Financials', 'CASH VALUE', 'N', 'The accumulated value of a permanent life insurance policy'),
+('Transactions', 'Financials', 'DEATH BENEFIT AMOUNT', 'N', 'The guaranteed amount payable to the beneficiary upon the insured''s death'),
+('Transactions', 'Financials', 'SURRENDER VALUE', 'N', 'The amount payable to the policyholder if the policy is voluntarily terminated before maturity or claim'),
+('Transactions', 'Financials', 'LOAN BALANCE', 'N', 'The outstanding balance of any loan taken against the policy''s cash value'),
+('Transactions', 'Transaction Details', 'PAYMENT METHOD', 'N', 'The mode of premium or transaction settlement'),
+('Transactions', 'Transaction Details', 'PROCESSING CHANNEL', 'N', 'The system'),
+('Underwriting', 'UW Info', 'UNDERWRITING DECISION REASON CODE', 'N', 'Provides the reason code for why an application is rejected'),
+('Underwriting', 'Identification', 'APPLICATION ID', 'N', 'Unique identifier assigned to each insurance application'),
+('Underwriting', 'Identification', 'POLICY NUMBER', 'N', 'Unique number assigned to the issued policy'),
+('Underwriting', 'Personal Information', 'APPLICANT NAME', 'Y', 'Full legal name of the applicant'),
+('Underwriting', 'Personal Information', 'DATE OF BIRTH', 'Y', 'Applicant''s date of birth'),
+('Underwriting', 'Personal Information', 'SOCIAL SECURITY NUMBER (SSN)', 'Y', 'Unique government-issued identifier for U.S. applicants'),
+('Underwriting', 'Personal Information', 'GENDER', 'Y', 'Gender of the applicant'),
+('Underwriting', 'Personal Information', 'MARITAL STATUS', 'Y', 'Marital status of the applicant'),
+('Underwriting', 'Contact Information', 'ADDRESS', 'Y', 'Residential address of the applicant'),
+('Underwriting', 'Contact Information', 'EMAIL', 'Y', 'Email address of the applicant'),
+('Underwriting', 'Contact Information', 'PHONE NUMBER', 'Y', 'Primary phone number of the applicant'),
+('Underwriting', 'Policy Details', 'PRODUCT TYPE', 'N', 'Type of insurance product applied for (e.g.'),
+('Underwriting', 'Policy Details', 'COVERAGE AMOUNT', 'N', 'Total coverage requested or approved in the policy'),
+('Underwriting', 'Risk Assessment', 'UNDERWRITING CLASS', 'N', 'Classification based on risk assessment (e.g.'),
+('Underwriting', 'Risk Assessment', 'MEDICAL HISTORY SUMMARY', 'Y', 'Key medical conditions or history affecting underwriting decision'),
+('Underwriting', 'Risk Assessment', 'HEIGHT', 'Y', 'Height of the applicant'),
+('Underwriting', 'Risk Assessment', 'WEIGHT', 'Y', 'Weight of the applicant'),
+('Underwriting', 'Risk Assessment', 'TOBACCO USE', 'Y', 'Indicates if the applicant uses tobacco products'),
+('Underwriting', 'Risk Assessment', 'HAZARDOUS OCCUPATION/ACTIVITY', 'N', 'Information about occupation or activities that increase risk'),
+('Underwriting', 'Policy Details', 'UNDERWRITING DECISION', 'N', 'Final decision by underwriters (e.g.'),
+('Underwriting', 'Policy Details', 'UNDERWRITER NOTES', 'N', 'Internal notes or comments from the underwriting review'),
+('Underwriting', 'Policy Details', 'PREMIUM AMOUNT', 'N', 'Approved premium for the policy based on underwriting and rating'),
+('Underwriting', 'Policy Details', 'EFFECTIVE DATE', 'N', 'Date the policy coverage begins'),
+('Underwriting', 'Policy Details', 'EXPIRY DATE', 'N', 'Date the policy coverage ends'),
+('Actuary', 'Customer_Master', 'Policyholder Name', 'Y', 'Full legal name of the insured individual or entity'),
+('Actuary', 'Customer_Demographics', 'Date of Birth', 'Y', 'Birth date of the policyholder'),
+('Actuary', 'Customer_Demographics', 'Gender', 'Y', 'Policyholder''s gender'),
+('Actuary', 'Customer_Location', 'Address / Postal Code', 'Y', 'Residential address or postal code for segmentation & compliance'),
+('Actuary', 'Policy_Master', 'Policy Number', 'N', 'Unique identifier assigned to an insurance contract'),
+('Actuary', 'Product_Catalog', 'Product Type', 'N', 'Insurance product category (e.g.'),
+('Actuary', 'Policy_Benefit', 'Coverage Amount / Sum Assured', 'N', 'Maximum benefit payable under the policy'),
+('Actuary', 'Policy_Financials', 'Premium Amount', 'N', 'Regular payment obligation of the policyholder'),
+('Actuary', 'Claims_Master', 'Claim ID', 'N', 'Unique identifier for claims lodged'),
+('Actuary', 'Claims_Cause', 'Cause of Claim / Diagnosis Code', 'Y', 'Reason for claim'),
+('Actuary', 'Claims_Financials', 'Claim Amount Paid', 'N', 'Final payout made to policyholder or beneficiary'),
+('Actuary', 'Actuarial_Reserves', 'Reserves', 'N', 'Liabilities set aside to cover future policyholder obligations'),
+('Actuary', 'Reinsurance', 'Reinsurance Recoverable', 'N', 'Portion of claims or reserves ceded to reinsurers'),
+('Actuary', 'Beneficiary_Master', 'Beneficiary Name', 'Y', 'Individual/entity designated to receive benefits'),
+('Actuary', 'Beneficiary_Details', 'Beneficiary Relationship', 'Y', 'Relation of beneficiary to policyholder (e.g.'),
+('Experience Study', 'Policy Information', 'Policy Number', 'N', 'Unique identifier assigned to an insurance policy'),
+('Experience Study', 'Policy Information', 'Contract Effective Date', 'N', 'The date when the insurance contract becomes effective. Type/category of insurance product (e.g.');
+
+-- =========================================================
+-- VERIFICATION
+-- =========================================================
+
+SELECT 
+    'Total CDEs Loaded' as METRIC,
+    COUNT(*) as VALUE
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+
+UNION ALL
+
+SELECT 
+    'Unique Domains' as METRIC,
+    COUNT(DISTINCT DOMAIN) as VALUE
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+
+UNION ALL
+
+SELECT 
+    'PII Elements' as METRIC,
+    COUNT(*) as VALUE
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE AND IS_PII = 'Y'
+
+UNION ALL
+
+SELECT 
+    'Non-PII Elements' as METRIC,
+    COUNT(*) as VALUE
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE AND IS_PII = 'N';
+
+-- =========================================================
+-- DOMAIN BREAKDOWN
+-- =========================================================
+
+SELECT 
+    DOMAIN,
+    COUNT(*) as CDE_COUNT,
+    SUM(CASE WHEN IS_PII = 'Y' THEN 1 ELSE 0 END) as PII_COUNT
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+GROUP BY DOMAIN
+ORDER BY CDE_COUNT DESC;
+
+-- Expected Output: 271 CDEs across 15 domains
+
+-- =========================================================
+-- GENERATE PATTERN RULES FROM CDE_REFERENCE
+-- Auto-generates ~800-1000 matching patterns
+-- =========================================================
+
+-- =========================================================
+-- STEP 1: EXACT MATCHES (Priority 10)
+-- =========================================================
+-- One EXACT pattern per CDE for perfect matches
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT 
+    CDE_ID,
+    'EXACT' as PATTERN_TYPE,
+    ATTRIBUTE_LOGICAL_NAME as PATTERN_VALUE,
+    10 as PATTERN_PRIORITY
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE;
+
+-- =========================================================
+-- STEP 2: FULL CONTAINS (Priority 50)
+-- =========================================================
+-- Contains the full attribute name (lower priority fallback)
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT 
+    CDE_ID,
+    'CONTAINS' as PATTERN_TYPE,
+    ATTRIBUTE_LOGICAL_NAME as PATTERN_VALUE,
+    50 as PATTERN_PRIORITY
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE;
+
+-- =========================================================
+-- STEP 3: KEYWORD EXTRACTION (Priority 20-40)
+-- =========================================================
+-- Extract meaningful keywords from attribute names
+-- Note: Skipping complex keyword extraction to avoid syntax issues
+-- Using direct pattern matching instead (see STEP 4 below)
+
+-- =========================================================
+-- STEP 3A: HIGH-VALUE KEYWORDS (Priority 20)
+-- =========================================================
+-- PII and specific identifiers
+
+-- General high-value keywords
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'DATE', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%DATE%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'AMOUNT', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%AMOUNT%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'NUMBER', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%NUMBER%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'NAME', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%NAME%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'ADDRESS', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%ADDRESS%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'EMAIL', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%EMAIL%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'PHONE', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%PHONE%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'ACCOUNT', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%ACCOUNT%';
+
+-- =========================================================
+-- STEP 3B: MEDIUM-VALUE KEYWORDS (Priority 30)
+-- =========================================================
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'STATUS', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%STATUS%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'CODE', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%CODE%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'TYPE', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TYPE%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'RATE', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%RATE%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'PERCENT', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%PERCENT%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'VALUE', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%VALUE%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'EFFECTIVE', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%EFFECTIVE%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'ORIGINAL', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%ORIGINAL%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'CURRENT', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%CURRENT%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'TOTAL', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TOTAL%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'TRANSACTION', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TRANSACTION%';
+
+-- =========================================================
+-- STEP 4: COMMON ABBREVIATIONS (Priority 20)
+-- =========================================================
+
+-- SSN related
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'SSN', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND (UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%SSN%' 
+    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%SOCIAL%SECURITY%'
+    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TAX%ID%');
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'TAX_ID', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND (UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TAX%ID%' 
+    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TAXPAYER%');
+
+-- DOB related
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'DOB', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND (UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%DOB%' 
+    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%DATE%BIRTH%'
+    OR UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%BIRTH%DATE%');
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'BIRTHDATE', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%BIRTH%DATE%';
+
+-- Claim related
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'CLAIM', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND DOMAIN = 'Claims';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'LOSS', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND DOMAIN = 'Claims'
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%LOSS%';
+
+-- Policy related
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'POLICY', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND (DOMAIN = 'Policy' OR DOMAIN = 'Coverage/Rider');
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'PREMIUM', 20
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%PREMIUM%';
+
+-- Fund related
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'FUND', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND DOMAIN = 'Investment Funds';
+
+-- Producer/Agent related
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'PRODUCER', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND DOMAIN = 'Financial Professional';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'CONTAINS', 'COMMISSION', 30
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND DOMAIN = 'Financial Professional'
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%COMMISSION%';
+
+-- =========================================================
+-- STEP 5: POSITIONAL PATTERNS (Priority 40)
+-- =========================================================
+
+-- STARTS_WITH patterns for common prefixes
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'CLAIM', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'CLAIM%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'POLICY', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'POLICY%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'FUND', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'FUND%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'PRODUCER', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'PRODUCER%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'BENEFICIARY', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'BENEFICIARY%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'APPLICANT', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'APPLICANT%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'INSURED', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'INSURED%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'PREMIUM', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'PREMIUM%';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'STARTS_WITH', 'COMPONENT', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE 'COMPONENT%';
+
+-- ENDS_WITH patterns for common suffixes
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'DATE', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%DATE';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'AMOUNT', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%AMOUNT';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'CODE', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%CODE';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'NUMBER', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%NUMBER';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'NAME', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%NAME';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'PERCENT', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%PERCENT';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'RATE', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%RATE';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'STATUS', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%STATUS';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'TYPE', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%TYPE';
+
+INSERT INTO CDE_PATTERN_RULES (CDE_ID, PATTERN_TYPE, PATTERN_VALUE, PATTERN_PRIORITY)
+SELECT CDE_ID, 'ENDS_WITH', 'ID', 40
+FROM CDE_REFERENCE
+WHERE IS_ACTIVE = TRUE
+  AND UPPER(ATTRIBUTE_LOGICAL_NAME) LIKE '%ID';
+
+-- =========================================================
+-- VERIFICATION
+-- =========================================================
+
+SELECT 
+    'Total Patterns Generated' as METRIC,
+    COUNT(*) as VALUE
+FROM CDE_PATTERN_RULES
+WHERE IS_ACTIVE = TRUE
+
+UNION ALL
+
+SELECT 
+    'Unique CDEs Covered' as METRIC,
+    COUNT(DISTINCT CDE_ID) as VALUE
+FROM CDE_PATTERN_RULES
+WHERE IS_ACTIVE = TRUE
+
+UNION ALL
+
+SELECT 
+    'Avg Patterns per CDE' as METRIC,
+    ROUND(COUNT(*) * 1.0 / COUNT(DISTINCT CDE_ID), 2) as VALUE
+FROM CDE_PATTERN_RULES
+WHERE IS_ACTIVE = TRUE;
+
+-- Pattern breakdown by type
+SELECT 
+    PATTERN_TYPE,
+    COUNT(*) as COUNT,
+    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 2) as PERCENTAGE
+FROM CDE_PATTERN_RULES
+WHERE IS_ACTIVE = TRUE
+GROUP BY PATTERN_TYPE
+ORDER BY COUNT DESC;
+
+-- Pattern breakdown by priority
+SELECT 
+    PATTERN_PRIORITY,
+    COUNT(*) as COUNT,
+    CASE 
+        WHEN PATTERN_PRIORITY = 10 THEN 'Exact (100%)'
+        WHEN PATTERN_PRIORITY = 20 THEN 'Specific Keywords (80%)'
+        WHEN PATTERN_PRIORITY = 30 THEN 'Generic Keywords (70%)'
+        WHEN PATTERN_PRIORITY = 40 THEN 'Positional (70%)'
+        WHEN PATTERN_PRIORITY = 50 THEN 'Broad Match (60%)'
+        ELSE 'Other'
+    END as CONFIDENCE_LEVEL
+FROM CDE_PATTERN_RULES
+WHERE IS_ACTIVE = TRUE
+GROUP BY PATTERN_PRIORITY
+ORDER BY PATTERN_PRIORITY;
+
+-- Expected Output:
+-- Total Patterns: ~800-1000
+-- CDEs Covered: 271
+-- Avg Patterns per CDE: 3-4
+
+
+-- ========================================
+-- AUDIT & SYSTEM COLUMN EXCLUSION LIST
+-- ========================================
+-- Add this table to filter out common audit/system columns
+
+CREATE TABLE IF NOT EXISTS CDE_EXCLUSION_PATTERNS (
+    EXCLUSION_ID NUMBER AUTOINCREMENT,
+    EXCLUSION_TYPE VARCHAR(50),
+    EXCLUSION_VALUE VARCHAR(500),
+    EXCLUSION_REASON TEXT,
+    IS_ACTIVE BOOLEAN DEFAULT TRUE,
+    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    PRIMARY KEY (EXCLUSION_ID)
+);
+
+-- ========================================
+-- INSERT COMMON AUDIT COLUMNS
+-- ========================================
+
+-- Timestamp audit columns
+INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
+('EXACT', 'CREATED_AT', 'Standard audit timestamp'),
+('EXACT', 'UPDATED_AT', 'Standard audit timestamp'),
+('EXACT', 'MODIFIED_AT', 'Standard audit timestamp'),
+('EXACT', 'DELETED_AT', 'Soft delete timestamp'),
+('EXACT', 'CREATED_DATE', 'Standard audit timestamp'),
+('EXACT', 'UPDATED_DATE', 'Standard audit timestamp'),
+('EXACT', 'MODIFIED_DATE', 'Standard audit timestamp'),
+('EXACT', 'DELETED_DATE', 'Soft delete timestamp'),
+('EXACT', 'CREATE_DATE', 'Standard audit timestamp'),
+('EXACT', 'UPDATE_DATE', 'Standard audit timestamp'),
+('EXACT', 'INSERT_DATE', 'Standard audit timestamp'),
+('EXACT', 'LOAD_DATE', 'ETL timestamp'),
+('EXACT', 'LOAD_TIMESTAMP', 'ETL timestamp'),
+('EXACT', 'INSERT_TIMESTAMP', 'ETL timestamp'),
+('EXACT', 'CREATE_TIMESTAMP', 'Standard audit timestamp'),
+('EXACT', 'UPDATE_TIMESTAMP', 'Standard audit timestamp'),
+('EXACT', 'LAST_MODIFIED', 'Standard audit timestamp'),
+('EXACT', 'LAST_UPDATED', 'Standard audit timestamp'),
+('EXACT', 'RECORD_CREATED', 'Standard audit timestamp'),
+('EXACT', 'RECORD_UPDATED', 'Standard audit timestamp');
+
+-- User audit columns
+INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
+('EXACT', 'CREATED_BY', 'Standard audit user'),
+('EXACT', 'UPDATED_BY', 'Standard audit user'),
+('EXACT', 'MODIFIED_BY', 'Standard audit user'),
+('EXACT', 'DELETED_BY', 'Soft delete user'),
+('EXACT', 'CREATE_USER', 'Standard audit user'),
+('EXACT', 'UPDATE_USER', 'Standard audit user'),
+('EXACT', 'INSERT_USER', 'ETL user'),
+('EXACT', 'LOAD_USER', 'ETL user'),
+('EXACT', 'LAST_MODIFIED_BY', 'Standard audit user'),
+('EXACT', 'LAST_UPDATED_BY', 'Standard audit user'),
+('EXACT', 'RECORD_CREATED_BY', 'Standard audit user'),
+('EXACT', 'RECORD_UPDATED_BY', 'Standard audit user');
+
+-- System/technical columns
+INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
+('EXACT', 'RECORD_ID', 'Generic system ID'),
+('EXACT', 'ROW_ID', 'Generic system ID'),
+('EXACT', 'ID', 'Generic system ID'),
+('EXACT', 'VERSION', 'Version control'),
+('EXACT', 'VERSION_NUMBER', 'Version control'),
+('EXACT', 'IS_ACTIVE', 'Soft delete flag'),
+('EXACT', 'IS_DELETED', 'Soft delete flag'),
+('EXACT', 'ACTIVE_FLAG', 'Soft delete flag'),
+('EXACT', 'DELETE_FLAG', 'Soft delete flag'),
+('EXACT', 'DELETED', 'Soft delete flag'),
+('EXACT', 'ETL_BATCH_ID', 'ETL metadata'),
+('EXACT', 'BATCH_ID', 'ETL metadata'),
+('EXACT', 'SOURCE_SYSTEM', 'ETL metadata'),
+('EXACT', 'SOURCE_FILE', 'ETL metadata'),
+('EXACT', 'LOAD_ID', 'ETL metadata'),
+('EXACT', 'PROCESS_ID', 'ETL metadata'),
+('EXACT', 'JOB_ID', 'ETL metadata'),
+('EXACT', 'RUN_ID', 'ETL metadata');
+
+-- Hash/checksum columns
+INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
+('EXACT', 'HASH', 'Technical hash'),
+('EXACT', 'CHECKSUM', 'Technical checksum'),
+('EXACT', 'ROW_HASH', 'Technical hash'),
+('EXACT', 'RECORD_HASH', 'Technical hash'),
+('EXACT', 'MD5_HASH', 'Technical hash'),
+('EXACT', 'SHA_HASH', 'Technical hash');
+
+-- Sequence columns
+INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
+('EXACT', 'SEQ', 'Sequence number'),
+('EXACT', 'SEQUENCE', 'Sequence number'),
+('EXACT', 'SEQ_NUM', 'Sequence number'),
+('EXACT', 'SEQUENCE_NUMBER', 'Sequence number'),
+('EXACT', 'ROW_NUM', 'Row number'),
+('EXACT', 'ROW_NUMBER', 'Row number');
+
+-- Pattern-based exclusions (use carefully)
+INSERT INTO CDE_EXCLUSION_PATTERNS (EXCLUSION_TYPE, EXCLUSION_VALUE, EXCLUSION_REASON) VALUES
+('ENDS_WITH', '_ID', 'Generic ID columns (too broad - review needed)'),
+('ENDS_WITH', '_KEY', 'Generic key columns'),
+('ENDS_WITH', '_HASH', 'Hash columns'),
+('ENDS_WITH', '_CHECKSUM', 'Checksum columns'),
+('STARTS_WITH', 'SYS_', 'System columns'),
+('STARTS_WITH', 'ETL_', 'ETL columns'),
+('CONTAINS', '_VERSION', 'Version columns');
+
+-- ========================================
+-- VERIFICATION QUERY
+-- ========================================
+SELECT 
+    EXCLUSION_TYPE,
+    COUNT(*) as COUNT
+FROM CDE_EXCLUSION_PATTERNS
+WHERE IS_ACTIVE = TRUE
+GROUP BY EXCLUSION_TYPE
+ORDER BY EXCLUSION_TYPE;
+
+-- Expected output:
+-- CONTAINS     : ~1-5
+-- ENDS_WITH    : ~5-10
+-- EXACT        : ~50-60
+-- STARTS_WITH  : ~2-5
+
+-- ========================================
+-- VIEW ALL EXCLUSIONS
+-- ========================================
+SELECT 
+    EXCLUSION_TYPE,
+    EXCLUSION_VALUE,
+    EXCLUSION_REASON
+FROM CDE_EXCLUSION_PATTERNS
+WHERE IS_ACTIVE = TRUE
+ORDER BY 
+    CASE EXCLUSION_TYPE
+        WHEN 'EXACT' THEN 1
+        WHEN 'STARTS_WITH' THEN 2
+        WHEN 'ENDS_WITH' THEN 3
+        WHEN 'CONTAINS' THEN 4
+        ELSE 5
+    END,
+    EXCLUSION_VALUE;
+
+
+
 import streamlit as st
 import pandas as pd
+import snowflake.snowpark as snowpark
+from snowflake.snowpark import Session
+import snowflake.snowpark.functions as F
 from datetime import datetime
-from snowflake.snowpark.context import get_active_session
-
-# Get the current credentials
-session = get_active_session()
+import re
+import json
 
 # Page configuration
 st.set_page_config(
-    page_title="Data Validation Dashboard",
-    page_icon="❄️",
+    page_title="CDE Management System (AI-Powered)",
+    page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for styling
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
         color: #1f77b4;
-        padding: 10px 0;
-        border-bottom: 2px solid #e0e0e0;
-        margin-bottom: 20px;
+        margin-bottom: 1rem;
+    }
+    .ai-badge {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 1rem;
+        font-size: 0.8rem;
+        font-weight: bold;
+    }
+    .intelligent-section {
+        background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+        border-left: 4px solid #667eea;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .pattern-section {
+        background: linear-gradient(135deg, #f093fb15 0%, #f5576c15 100%);
+        border-left: 4px solid #f093fb;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .success-ai {
+        background: linear-gradient(135deg, #11998e15 0%, #38ef7d15 100%);
+        border-left: 4px solid #11998e;
+        padding: 1rem;
+        border-radius: 0.5rem;
     }
     .metric-card {
-        background-color: #f8f9fa;
-        padding: 15px;
-        border-radius: 8px;
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
         border-left: 4px solid #1f77b4;
-        margin: 5px 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Helper Functions
-@st.cache_data
-def get_rowcount(_session, database, schema, table):
-    if database and schema and table:
-        try:
-            rowcount_result = _session.sql(f"SELECT COUNT(1) AS row_count FROM \"{database}\".\"{schema}\".\"{table}\"").collect()
-            return rowcount_result[0]['ROW_COUNT']
-        except Exception as e:
-            return 0
-    return 0
+# Get Snowflake session
+@st.cache_resource
+def get_session():
+    return snowpark.context.get_active_session()
 
-def get_all_load_names(session, environment='DEV'):
-    """Get all unique load names from metadata"""
+try:
+    session = get_session()
+except:
+    st.error("❌ Unable to connect to Snowflake session.")
+    st.stop()
+
+# Cortex Helper Function using SQL
+def call_cortex(prompt, model='mixtral-8x7b'):
+    """Call Cortex AI using SQL function"""
     try:
-        env_db_mapping = {
-            'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
-            'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
-            'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
-        }
-        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
+        # Escape single quotes in prompt
+        prompt_clean = prompt.replace("'", "''")
         
-        query = f"""
-        SELECT DISTINCT LOAD_NAME
-        FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
-        WHERE ACTIVE_IND = 'Y' AND LOAD_TYPE = 'LOD_TO_LOD'
-        ORDER BY LOAD_NAME
+        sql = f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            '{model}',
+            '{prompt_clean}'
+        ) as response
         """
-        result = session.sql(query).collect()
-        return [row['LOAD_NAME'] for row in result]
+        
+        result = session.sql(sql).collect()
+        return result[0]['RESPONSE'] if result else ""
     except Exception as e:
-        st.error(f"Error fetching load names: {str(e)}")
+        return f"Error calling Cortex: {str(e)}"
+
+# Exclusion Check Function
+def is_excluded_column(column_name):
+    """Check if column should be excluded from CDE scanning"""
+    try:
+        # Try to load exclusion patterns
+        df_exclusions = session.table("CDE_EXCLUSION_PATTERNS").filter(F.col("IS_ACTIVE") == True).to_pandas()
+        
+        column_upper = column_name.upper()
+        
+        for _, exclusion in df_exclusions.iterrows():
+            exclusion_type = exclusion['EXCLUSION_TYPE']
+            exclusion_value = exclusion['EXCLUSION_VALUE'].upper()
+            
+            if exclusion_type == 'EXACT':
+                if column_upper == exclusion_value:
+                    return True, exclusion['EXCLUSION_REASON']
+            
+            elif exclusion_type == 'CONTAINS':
+                if exclusion_value in column_upper:
+                    return True, exclusion['EXCLUSION_REASON']
+            
+            elif exclusion_type == 'STARTS_WITH':
+                if column_upper.startswith(exclusion_value):
+                    return True, exclusion['EXCLUSION_REASON']
+            
+            elif exclusion_type == 'ENDS_WITH':
+                if column_upper.endswith(exclusion_value):
+                    return True, exclusion['EXCLUSION_REASON']
+        
+        return False, None
+        
+    except Exception as e:
+        # If exclusion table doesn't exist, skip exclusion check
+        return False, None
+
+# Smart Exclusion with AI (optional - for edge cases)
+def ai_should_exclude_column(column_name, table_name, data_type):
+    """Use AI to determine if column is technical/audit (fallback)"""
+    prompt = f"""Is this database column a technical/audit/system column that should be excluded from business data analysis?
+
+Column: {column_name}
+Table: {table_name}
+Type: {data_type}
+
+Common technical columns: created_at, updated_by, record_id, version, etl_batch_id, hash, checksum, etc.
+
+Answer ONLY: YES or NO"""
+    
+    try:
+        result = call_cortex(prompt, 'mistral-7b')
+        return 'YES' in result.upper()
+    except:
+        return False
+
+# Cortex AI Functions
+def generate_pattern_suggestions(attribute_name, domain):
+    """Generate intelligent pattern suggestions using Cortex"""
+    prompt = f"""You are a data governance expert. Given this data element:
+    - Attribute Name: {attribute_name}
+    - Domain: {domain}
+    
+    Generate 8 common database column name variations that might exist in real databases.
+    Consider: abbreviations, prefixes, suffixes, underscores, common aliases.
+    
+    Return ONLY a JSON array of strings (no explanation):
+    ["PATTERN1", "PATTERN2", ...]
+    """
+    
+    try:
+        result = call_cortex(prompt, 'mixtral-8x7b')
+        # Extract JSON array from response
+        result = result.strip()
+        if '```' in result:
+            result = result.split('```')[1].replace('json', '').strip()
+        patterns = json.loads(result)
+        return patterns if isinstance(patterns, list) else []
+    except:
         return []
 
-def get_dashboard_data(session, environments, load_names):
-    """Get dashboard data for selected environments and load names"""
-    dashboard_data = []
+def generate_definition(attribute_name, domain, tag):
+    """Generate professional definition using Cortex"""
+    prompt = f"""You are a data dictionary expert. Write a clear, professional definition for:
+    - Attribute: {attribute_name}
+    - Domain: {domain}
+    - Tag: {tag}
     
-    env_db_mapping = {
-        'DEV': 'CMD_LIFE_DEV_PUBLISH_DB',
-        'TEST': 'CMD_LIFE_TEST_PUBLISH_DB',
-        'UAT': 'CMD_LIFE_UAT_PUBLISH_DB'
-    }
+    Requirements:
+    - 2-3 sentences maximum
+    - Professional tone
+    - Include: what it is, why it matters, typical usage
+    - No bullet points
     
-    for environment in environments:
-        metadata_db = env_db_mapping.get(environment, 'CMD_LIFE_DEV_PUBLISH_DB')
+    Return ONLY the definition text (no labels or formatting).
+    """
+    
+    try:
+        result = call_cortex(prompt, 'mixtral-8x7b')
+        return result.strip()
+    except Exception as e:
+        return f"Error generating definition: {str(e)}"
+
+def semantic_column_match(column_name, cde_list, context=""):
+    """Find semantic matches using Cortex"""
+    cde_sample = cde_list[:20]  # Limit for token size
+    
+    prompt = f"""You are a data matching expert. 
+    
+    Column to match: "{column_name}"
+    Context: {context}
+    
+    Available CDEs:
+    {chr(10).join([f"- {cde}" for cde in cde_sample])}
+    
+    Task: Find the BEST semantic match from the list above.
+    
+    Return ONLY:
+    - The matched CDE name if similar (confidence > 70%)
+    - "NONE" if no good match
+    
+    No explanation, just the answer.
+    """
+    
+    try:
+        result = call_cortex(prompt, 'mistral-7b')
+        result = result.strip().strip('"').strip("'")
+        return result if result != "NONE" else None
+    except:
+        return None
+
+def generate_intelligent_reasoning(column_name, table_name, matched_cde, definition, data_type, is_pii):
+    """Generate intelligent match reasoning using Cortex with context"""
+    prompt = f"""You are a data governance analyst. Explain this CDE match:
+    
+    MATCH DETAILS:
+    - Column: {column_name} (Type: {data_type})
+    - Table: {table_name}
+    - Matched CDE: {matched_cde}
+    - Is PII: {is_pii}
+    - Definition: {definition}
+    
+    Provide analysis covering:
+    1. Why this is a match (1 sentence)
+    2. Data sensitivity and compliance concerns (1 sentence)
+    3. Recommended action (1 sentence)
+    
+    Return as a single paragraph, professional tone, max 150 words.
+    """
+    
+    try:
+        result = call_cortex(prompt, 'mixtral-8x7b')
+        return result.strip()
+    except Exception as e:
+        return f"Standard match based on pattern matching. {definition[:100]}"
+
+def validate_match_quality(column_name, table_name, matched_cde, definition):
+    """AI validation of match quality"""
+    prompt = f"""You are a data quality validator.
+    
+    MATCH TO VALIDATE:
+    - Column: {column_name} in table {table_name}
+    - Matched CDE: {matched_cde}
+    - CDE Definition: {definition}
+    
+    Is this a TRUE MATCH or FALSE POSITIVE?
+    
+    Consider:
+    - Semantic alignment
+    - Context appropriateness
+    - Definition relevance
+    
+    Return ONLY: TRUE or FALSE (nothing else)
+    """
+    
+    try:
+        result = call_cortex(prompt, 'mistral-7b')
+        return 'TRUE' in result.upper()
+    except:
+        return True  # Default to true if AI fails
+
+def ai_classify_column(column_name, table_name, data_type):
+    """AI-powered column classification"""
+    prompt = f"""You are a data classification expert.
+    
+    Classify this database column:
+    - Column: {column_name}
+    - Table: {table_name}
+    - Data Type: {data_type}
+    
+    Provide:
+    1. Likely Domain (Claims, Coverage, Financial, etc.)
+    2. Likely Tag (Event Details, Financial Metrics, etc.)
+    3. PII Status (Y or N)
+    4. Confidence (0-100)
+    
+    Return as JSON:
+    {{"domain": "...", "tag": "...", "is_pii": "Y/N", "confidence": 85}}
+    """
+    
+    try:
+        result = call_cortex(prompt, 'mixtral-8x7b')
+        if '```' in result:
+            result = result.split('```')[1].replace('json', '').strip()
+        classification = json.loads(result)
+        return classification
+    except:
+        return {"domain": "Unknown", "tag": "Unknown", "is_pii": "N", "confidence": 0}
+
+# Helper function to generate unique scan run ID
+def generate_scan_run_id():
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return f"SCAN_{timestamp}"
+
+# Helper function to match patterns
+def match_pattern(column_name, pattern_type, pattern_value):
+    """Check if a column name matches a pattern"""
+    column_upper = column_name.upper()
+    pattern_upper = pattern_value.upper()
+    
+    if pattern_type == 'EXACT':
+        return column_upper == pattern_upper
+    elif pattern_type == 'CONTAINS':
+        return pattern_upper in column_upper
+    elif pattern_type == 'STARTS_WITH':
+        return column_upper.startswith(pattern_upper)
+    elif pattern_type == 'ENDS_WITH':
+        return column_upper.endswith(pattern_upper)
+    elif pattern_type == 'REGEX':
+        try:
+            return bool(re.search(pattern_upper, column_upper))
+        except:
+            return False
+    return False
+
+# Sidebar navigation
+st.sidebar.markdown("# 🤖 CDE Management")
+st.sidebar.markdown("*Powered by Snowflake Cortex AI*")
+st.sidebar.markdown("---")
+
+page = st.sidebar.radio(
+    "Navigate to:",
+    [
+        "📋 Reference Data Management",
+        "🔍 CDE Scan (Intelligent)",
+        "📊 CDE Findings & Analysis",
+        "💬 Ask Cortex AI"
+    ],
+    key="navigation"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🎯 AI Features")
+st.sidebar.info("""
+✨ **AI-Powered Features:**
+- 🤖 Pattern Suggestions
+- ✍️ Auto Definitions
+- 🔍 Semantic Matching
+- 🧠 Intelligent Reasoning
+- ✅ Match Validation
+- 💬 Natural Language Q&A
+""")
+
+# ==================== SCREEN 1: REFERENCE DATA MANAGEMENT ====================
+if page == "📋 Reference Data Management":
+    st.markdown('<div class="main-header">📋 CDE Reference Data Management</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 AI-ENHANCED</span>', unsafe_allow_html=True)
+    
+    # Create reference table if not exists
+    try:
+        session.sql("""
+            CREATE TABLE IF NOT EXISTS CDE_REFERENCE (
+                CDE_ID NUMBER AUTOINCREMENT,
+                DOMAIN VARCHAR(200),
+                TAG VARCHAR(200),
+                ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
+                IS_PII VARCHAR(1),
+                DEFINITION TEXT,
+                CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+                UPDATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                UPDATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+                IS_ACTIVE BOOLEAN DEFAULT TRUE,
+                PRIMARY KEY (CDE_ID)
+            )
+        """).collect()
+    except Exception as e:
+        st.error(f"Error ensuring table exists: {str(e)}")
+    
+    # Tabs for different operations
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 View All", "➕ Add New (AI-Enhanced)", "✏️ Edit", "🗑️ Delete"])
+    
+    # TAB 1: View All (unchanged - keeping it clean)
+    with tab1:
+        st.markdown("### Current CDE Reference Data")
         
-        for load_name in load_names:
-            try:
-                query = f"""
-                SELECT DISTINCT
-                    APPLICATION_NAME,
-                    LOAD_NAME,
-                    SOURCE_DATABASE_NAME,
-                    SOURCE_SCHEMA_NAME,
-                    SOURCE_TABLE_NAME,
-                    TARGET_DATABASE_NAME,
-                    TARGET_SCHEMA_NAME,
-                    TARGET_TABLE_NAME,
-                    ORCHESTRATION_JOB_NAME
-                FROM {metadata_db}.GLOBAL.METADATA_SOURCE_TARGET_COLUMN_RULES
-                WHERE LOAD_NAME = '{load_name}'
-                AND ACTIVE_IND = 'Y' 
-                AND LOAD_TYPE = 'LOD_TO_LOD'
-                ORDER BY SOURCE_TABLE_NAME
-                """
+        try:
+            df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+            
+            if len(df_ref) > 0:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total CDEs", len(df_ref))
+                with col2:
+                    st.metric("Unique Domains", df_ref['DOMAIN'].nunique())
+                with col3:
+                    st.metric("PII Elements", len(df_ref[df_ref['IS_PII'] == 'Y']))
+                with col4:
+                    st.metric("Unique Tags", df_ref['TAG'].nunique())
                 
-                result = session.sql(query).collect()
+                st.markdown("---")
                 
-                for row in result:
-                    # Get row counts
-                    source_count = get_rowcount(session, 
-                                              row['SOURCE_DATABASE_NAME'],
-                                              row['SOURCE_SCHEMA_NAME'],
-                                              row['SOURCE_TABLE_NAME'])
-                    
-                    target_count = get_rowcount(session,
-                                              row['TARGET_DATABASE_NAME'],
-                                              row['TARGET_SCHEMA_NAME'],
-                                              row['TARGET_TABLE_NAME'])
-                    
-                    # Calculate variance
-                    if source_count > 0:
-                        variance = abs((source_count - target_count) / source_count * 100)
-                    else:
-                        variance = 100 if target_count > 0 else 0
-                    
-                    # Determine status
-                    if target_count == 0:
-                        status = "NO DATA"
-                    elif variance <= 1:
-                        status = "MATCH"
-                    elif variance <= 5:
-                        status = "WARNING"
-                    else:
-                        status = "MISMATCH"
-                    
-                    dashboard_data.append({
-                        'Environment': environment,
-                        'Load Name': row['LOAD_NAME'],
-                        'Application': row['APPLICATION_NAME'],
-                        'Source Table': row['SOURCE_TABLE_NAME'],
-                        'Target Table': row['TARGET_TABLE_NAME'],
-                        'Source Count': source_count,
-                        'Target Count': target_count,
-                        'Variance %': round(variance, 2),
-                        'Status': status,
-                        'Job Name': row['ORCHESTRATION_JOB_NAME']
-                    })
-                    
-            except Exception as e:
-                st.error(f"Error fetching data for {load_name} in {environment}: {str(e)}")
+                # Filters
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    filter_domain = st.multiselect(
+                        "Filter by Domain",
+                        options=sorted(df_ref['DOMAIN'].dropna().unique().tolist()),
+                        default=[]
+                    )
+                with col2:
+                    filter_tag = st.multiselect(
+                        "Filter by Tag",
+                        options=sorted(df_ref['TAG'].dropna().unique().tolist()),
+                        default=[]
+                    )
+                with col3:
+                    filter_pii = st.selectbox("Filter by PII", options=["All", "Y", "N"])
+                
+                # Apply filters
+                filtered_df = df_ref.copy()
+                if filter_domain:
+                    filtered_df = filtered_df[filtered_df['DOMAIN'].isin(filter_domain)]
+                if filter_tag:
+                    filtered_df = filtered_df[filtered_df['TAG'].isin(filter_tag)]
+                if filter_pii != "All":
+                    filtered_df = filtered_df[filtered_df['IS_PII'] == filter_pii]
+                
+                st.info(f"Showing {len(filtered_df)} of {len(df_ref)} records")
+                
+                st.dataframe(
+                    filtered_df[['CDE_ID', 'DOMAIN', 'TAG', 'ATTRIBUTE_LOGICAL_NAME', 'IS_PII', 'DEFINITION']],
+                    use_container_width=True,
+                    height=500
+                )
+                
+                csv = filtered_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download as CSV",
+                    data=csv,
+                    file_name=f"cde_reference_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+                
+            else:
+                st.warning("⚠️ No reference data found. Please add CDE definitions.")
+        except Exception as e:
+            st.error(f"Error loading reference data: {str(e)}")
     
-    return dashboard_data
-
-# Header
-st.markdown('<h1 class="main-header">Data Validation Dashboard</h1>', unsafe_allow_html=True)
-st.markdown("Multi-Environment Migration Monitoring")
-st.markdown("---")
-
-# Sidebar Filters
-with st.sidebar:
-    st.markdown("## Filters")
-    
-    # Environment Selection
-    selected_environments = st.multiselect(
-        "Environments",
-        options=['DEV', 'TEST', 'UAT'],
-        default=['DEV'],
-        key="dashboard_environments"
-    )
-    
-    # Application Selection
-    if selected_environments:
-        all_load_names = get_all_load_names(session, selected_environments[0])
+    # TAB 2: Add New - AI ENHANCED
+    with tab2:
+        st.markdown("### Add New CDE Definition")
+        st.markdown('<span class="ai-badge">🤖 AI-POWERED</span>', unsafe_allow_html=True)
         
-        selected_load_names = st.multiselect(
-            "Load Names",
-            options=all_load_names,
-            default=all_load_names if all_load_names else [],
-            key="dashboard_load_names"
-        )
-    else:
-        st.info("Select at least one environment")
-        selected_load_names = []
-    
-    st.markdown("---")
-    
-    # Refresh button
-    if st.button("🔄 Refresh", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-    
-    st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-# Main Dashboard Content
-if selected_environments and selected_load_names:
-    with st.spinner("Loading dashboard data..."):
-        dashboard_data = get_dashboard_data(session, selected_environments, selected_load_names)
-    
-    if dashboard_data:
-        df_dashboard = pd.DataFrame(dashboard_data)
+        # Manual Entry Section
+        st.markdown('<div class="pattern-section">', unsafe_allow_html=True)
+        st.markdown("#### 📝 Manual Entry")
         
-        # Summary Statistics
-        st.markdown("### Summary Statistics")
+        with st.form("add_cde_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                add_domain = st.text_input("Domain *", placeholder="e.g., Claims, Coverage/Rider")
+                add_tag = st.text_input("Tag *", placeholder="e.g., Event Details, Financial Metrics")
+                add_attr_name = st.text_input("Attribute Logical Name *", placeholder="e.g., CLAIM_DATE_OF_LOSS")
+            
+            with col2:
+                add_is_pii = st.selectbox("Is PII? *", options=["N", "Y"])
+                add_definition = st.text_area("Definition *", placeholder="Detailed description", height=120)
+            
+            submit_add = st.form_submit_button("➕ Add CDE", type="primary")
+            
+            if submit_add:
+                if not add_domain or not add_tag or not add_attr_name or not add_definition:
+                    st.error("❌ Please fill in all required fields (*)")
+                else:
+                    try:
+                        domain_clean = add_domain.replace("'", "''")
+                        tag_clean = add_tag.replace("'", "''")
+                        attr_clean = add_attr_name.replace("'", "''")
+                        def_clean = add_definition.replace("'", "''")
+                        
+                        insert_query = f"""
+                        INSERT INTO CDE_REFERENCE (DOMAIN, TAG, ATTRIBUTE_LOGICAL_NAME, IS_PII, DEFINITION)
+                        VALUES ('{domain_clean}', '{tag_clean}', '{attr_clean}', '{add_is_pii}', '{def_clean}')
+                        """
+                        session.sql(insert_query).collect()
+                        st.success(f"✅ Successfully added CDE: **{add_attr_name}**")
+                        st.balloons()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error adding CDE: {str(e)}")
         
-        total_tables = len(df_dashboard)
-        match_tables = len(df_dashboard[df_dashboard['Status'] == 'MATCH'])
-        warning_tables = len(df_dashboard[df_dashboard['Status'] == 'WARNING'])
-        mismatch_tables = len(df_dashboard[df_dashboard['Status'] == 'MISMATCH'])
-        no_data_tables = len(df_dashboard[df_dashboard['Status'] == 'NO DATA'])
+        st.markdown('</div>', unsafe_allow_html=True)
         
-        col1, col2, col3, col4, col5 = st.columns(5)
+        # AI Assistant Section
+        st.markdown('<div class="intelligent-section">', unsafe_allow_html=True)
+        st.markdown("#### 🤖 AI Assistant")
+        st.markdown("*Use Cortex AI to help create your CDE definition*")
+        
+        col1, col2 = st.columns(2)
         
         with col1:
-            st.metric("Total Tables", total_tables)
+            ai_attr_name = st.text_input("Attribute Name", key="ai_attr", placeholder="e.g., CUSTOMER_SSN")
+            ai_domain = st.text_input("Domain", key="ai_domain", placeholder="e.g., New Business")
         
         with col2:
-            st.metric("Match", match_tables, 
-                     delta=f"{(match_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
-        
-        with col3:
-            st.metric("Warning", warning_tables,
-                     delta=f"{(warning_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%")
-        
-        with col4:
-            st.metric("Mismatch", mismatch_tables,
-                     delta=f"{(mismatch_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
-                     delta_color="inverse")
-        
-        with col5:
-            st.metric("No Data", no_data_tables,
-                     delta=f"{(no_data_tables/total_tables*100):.1f}%" if total_tables > 0 else "0%",
-                     delta_color="inverse")
+            ai_tag = st.text_input("Tag", key="ai_tag", placeholder="e.g., Applicant Info")
         
         st.markdown("---")
         
-        # Table Filters
-        st.markdown("### Filter Results")
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            status_filter = st.multiselect(
-                "Filter by Status",
-                options=['MATCH', 'WARNING', 'MISMATCH', 'NO DATA'],
-                default=['MATCH', 'WARNING', 'MISMATCH', 'NO DATA'],
-                key="status_filter"
-            )
+            if st.button("🤖 Generate Pattern Suggestions", type="secondary", use_container_width=True):
+                if ai_attr_name and ai_domain:
+                    with st.spinner("🤖 AI is thinking..."):
+                        patterns = generate_pattern_suggestions(ai_attr_name, ai_domain)
+                        if patterns:
+                            st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                            st.markdown("**💡 AI-Generated Pattern Suggestions:**")
+                            st.code(", ".join(patterns))
+                            st.markdown("*Use these to create pattern rules in CDE_PATTERN_RULES table*")
+                            st.markdown('</div>', unsafe_allow_html=True)
+                        else:
+                            st.warning("Could not generate patterns")
+                else:
+                    st.warning("Please enter Attribute Name and Domain")
         
         with col2:
-            env_filter = st.multiselect(
-                "Filter by Environment",
-                options=selected_environments,
-                default=selected_environments,
-                key="env_filter"
-            )
+            if st.button("✍️ Generate Definition", type="secondary", use_container_width=True):
+                if ai_attr_name and ai_domain:
+                    with st.spinner("🤖 AI is writing..."):
+                        definition = generate_definition(ai_attr_name, ai_domain, ai_tag or "General")
+                        if definition:
+                            st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                            st.markdown("**📝 AI-Generated Definition:**")
+                            st.info(definition)
+                            st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.warning("Please enter Attribute Name and Domain")
         
         with col3:
-            app_filter = st.multiselect(
-                "Filter by Load Name",
-                options=selected_load_names,
-                default=selected_load_names,
-                key="load_name_filter"
-            )
-        
-        # Apply filters
-        df_filtered = df_dashboard[
-            (df_dashboard['Status'].isin(status_filter)) &
-            (df_dashboard['Environment'].isin(env_filter)) &
-            (df_dashboard['Load Name'].isin(app_filter))
-        ]
-        
-        st.markdown("---")
-        st.markdown(f"### Validation Results ({len(df_filtered)} tables)")
-        
-        # Color coding function
-        def highlight_status(row):
-            if row['Status'] == 'MATCH':
-                return ['background-color: #d4edda'] * len(row)
-            elif row['Status'] == 'WARNING':
-                return ['background-color: #fff3cd'] * len(row)
-            elif row['Status'] == 'MISMATCH':
-                return ['background-color: #f8d7da'] * len(row)
-            elif row['Status'] == 'NO DATA':
-                return ['background-color: #e2e3e5'] * len(row)
-            return [''] * len(row)
-        
-        # Display filtered data
-        styled_df = df_filtered.style.apply(highlight_status, axis=1)
-        
-        st.dataframe(
-            styled_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Source Count": st.column_config.NumberColumn(format="%d"),
-                "Target Count": st.column_config.NumberColumn(format="%d"),
-                "Variance %": st.column_config.NumberColumn(format="%.2f%%"),
-            }
-        )
-        
-        # Download button
-        st.markdown("---")
-        csv = df_filtered.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download CSV",
-            data=csv,
-            file_name=f"validation_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
-        
-        # Environment Breakdown
-        st.markdown("---")
-        st.markdown("### Environment Breakdown")
-        
-        for env in selected_environments:
-            with st.expander(f"{env} Environment", expanded=False):
-                env_data = df_filtered[df_filtered['Environment'] == env]
-                
-                if not env_data.empty:
-                    env_match = len(env_data[env_data['Status'] == 'MATCH'])
-                    env_total = len(env_data)
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric(f"{env} Total", env_total)
-                    with col2:
-                        st.metric(f"{env} Match", env_match)
-                    with col3:
-                        st.metric(f"{env} Issues", env_total - env_match)
-                    with col4:
-                        st.metric(f"{env} Success Rate", f"{(env_match/env_total*100):.1f}%")
-                    
-                    st.markdown("---")
-                    
-                    # Group by load name
-                    st.markdown(f"**Load Names in {env}:**")
-                    for load_name in env_data['Load Name'].unique():
-                        load_data = env_data[env_data['Load Name'] == load_name]
-                        load_match = len(load_data[load_data['Status'] == 'MATCH'])
-                        load_total = len(load_data)
-                        
-                        status_icon = "✅" if load_match == load_total else "⚠️" if load_match > 0 else "❌"
-                        st.write(f"{status_icon} {load_name}: {load_match}/{load_total} tables matching ({(load_match/load_total*100):.1f}%)")
+            if st.button("🎯 Suggest Classification", type="secondary", use_container_width=True):
+                if ai_attr_name:
+                    with st.spinner("🤖 AI is analyzing..."):
+                        classification = ai_classify_column(ai_attr_name, "N/A", "VARCHAR")
+                        st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                        st.markdown("**🎯 AI Classification:**")
+                        st.write(f"**Domain:** {classification.get('domain', 'Unknown')}")
+                        st.write(f"**Tag:** {classification.get('tag', 'Unknown')}")
+                        st.write(f"**PII:** {classification.get('is_pii', 'N')}")
+                        st.write(f"**Confidence:** {classification.get('confidence', 0)}%")
+                        st.markdown('</div>', unsafe_allow_html=True)
                 else:
-                    st.info(f"No data for {env} environment with current filters")
+                    st.warning("Please enter Attribute Name")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
     
-    else:
-        st.warning("No data found for selected environments and load names")
+    # TAB 3 & 4: Edit and Delete (keeping simple - no AI needed here)
+    with tab3:
+        st.markdown("### Edit Existing CDE Definition")
+        
+        try:
+            df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+            
+            if len(df_ref) > 0:
+                cde_options = df_ref.apply(
+                    lambda x: f"{x['CDE_ID']} - {x['DOMAIN']} - {x['ATTRIBUTE_LOGICAL_NAME']}", 
+                    axis=1
+                ).tolist()
+                
+                selected_cde = st.selectbox("Select CDE to Edit", options=cde_options)
+                
+                if selected_cde:
+                    cde_id = int(selected_cde.split(" - ")[0])
+                    current_data = df_ref[df_ref['CDE_ID'] == cde_id].iloc[0]
+                    
+                    with st.form("edit_cde_form"):
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            edit_domain = st.text_input("Domain *", value=current_data['DOMAIN'])
+                            edit_tag = st.text_input("Tag *", value=current_data['TAG'])
+                            edit_attr_name = st.text_input("Attribute Logical Name *", value=current_data['ATTRIBUTE_LOGICAL_NAME'])
+                        
+                        with col2:
+                            edit_is_pii = st.selectbox("Is PII? *", options=["Y", "N"], index=0 if current_data['IS_PII'] == 'Y' else 1)
+                            edit_definition = st.text_area("Definition *", value=current_data['DEFINITION'] if pd.notna(current_data['DEFINITION']) else "", height=120)
+                        
+                        submit_edit = st.form_submit_button("💾 Update", type="primary")
+                        
+                        if submit_edit:
+                            try:
+                                domain_clean = edit_domain.replace("'", "''")
+                                tag_clean = edit_tag.replace("'", "''")
+                                attr_clean = edit_attr_name.replace("'", "''")
+                                def_clean = edit_definition.replace("'", "''")
+                                
+                                update_query = f"""
+                                UPDATE CDE_REFERENCE SET
+                                    DOMAIN = '{domain_clean}',
+                                    TAG = '{tag_clean}',
+                                    ATTRIBUTE_LOGICAL_NAME = '{attr_clean}',
+                                    IS_PII = '{edit_is_pii}',
+                                    DEFINITION = '{def_clean}',
+                                    UPDATED_DATE = CURRENT_TIMESTAMP(),
+                                    UPDATED_BY = CURRENT_USER()
+                                WHERE CDE_ID = {cde_id}
+                                """
+                                session.sql(update_query).collect()
+                                st.success(f"✅ Successfully updated CDE ID {cde_id}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error updating CDE: {str(e)}")
+            else:
+                st.warning("⚠️ No CDE definitions available to edit.")
+        except Exception as e:
+            st.error(f"❌ Error loading data: {str(e)}")
+    
+    with tab4:
+        st.markdown("### Delete CDE Definition")
+        st.warning("⚠️ This will soft-delete the record (set IS_ACTIVE = FALSE)")
+        
+        try:
+            df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+            
+            if len(df_ref) > 0:
+                cde_options = df_ref.apply(
+                    lambda x: f"{x['CDE_ID']} - {x['DOMAIN']} - {x['ATTRIBUTE_LOGICAL_NAME']}", 
+                    axis=1
+                ).tolist()
+                
+                selected_delete = st.selectbox("Select CDE to Delete", options=cde_options, key="delete_select")
+                
+                if selected_delete:
+                    cde_id = int(selected_delete.split(" - ")[0])
+                    current_data = df_ref[df_ref['CDE_ID'] == cde_id].iloc[0]
+                    
+                    st.markdown("**Record to Delete:**")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Domain:** {current_data['DOMAIN']}")
+                        st.write(f"**Tag:** {current_data['TAG']}")
+                    with col2:
+                        st.write(f"**Attribute:** {current_data['ATTRIBUTE_LOGICAL_NAME']}")
+                        st.write(f"**Is PII:** {current_data['IS_PII']}")
+                    
+                    if st.button("🗑️ Confirm Delete", type="primary"):
+                        try:
+                            delete_query = f"""
+                            UPDATE CDE_REFERENCE 
+                            SET IS_ACTIVE = FALSE, UPDATED_DATE = CURRENT_TIMESTAMP(), UPDATED_BY = CURRENT_USER()
+                            WHERE CDE_ID = {cde_id}
+                            """
+                            session.sql(delete_query).collect()
+                            st.success(f"✅ CDE ID {cde_id} deleted")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+            else:
+                st.warning("⚠️ No CDE definitions available.")
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
 
-else:
-    st.info("Please select at least one environment and one load name from the sidebar")
+# ==================== SCREEN 2: CDE SCAN (INTELLIGENT) ====================
+elif page == "🔍 CDE Scan (Intelligent)":
+    st.markdown('<div class="main-header">🔍 Intelligent CDE Scan</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 AI-POWERED MATCHING</span>', unsafe_allow_html=True)
+    
+    # Create scan results table
+    try:
+        session.sql("""
+            CREATE TABLE IF NOT EXISTS CDE_SCAN_RESULTS (
+                SCAN_ID NUMBER AUTOINCREMENT,
+                SCAN_RUN_ID VARCHAR(100),
+                SCAN_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                SCAN_USER VARCHAR(100) DEFAULT CURRENT_USER(),
+                DATABASE_NAME VARCHAR(200),
+                SCHEMA_NAME VARCHAR(200),
+                TABLE_NAME VARCHAR(200),
+                COLUMN_NAME VARCHAR(200),
+                DATA_TYPE VARCHAR(100),
+                MATCHED_CDE_ID NUMBER,
+                MATCHED_DOMAIN VARCHAR(200),
+                MATCHED_TAG VARCHAR(200),
+                MATCHED_ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
+                MATCHED_IS_PII VARCHAR(1),
+                MATCHED_DEFINITION TEXT,
+                PATTERN_ID NUMBER,
+                PATTERN_TYPE VARCHAR(50),
+                PATTERN_VALUE VARCHAR(500),
+                MATCH_SCORE NUMBER(5,2),
+                MATCH_REASON VARCHAR(2000),
+                MATCH_METHOD VARCHAR(50),
+                AI_VALIDATED BOOLEAN,
+                IS_REVIEWED BOOLEAN DEFAULT FALSE,
+                REVIEW_STATUS VARCHAR(50),
+                REVIEW_NOTES TEXT,
+                REVIEWED_BY VARCHAR(100),
+                REVIEWED_DATE TIMESTAMP_NTZ,
+                PRIMARY KEY (SCAN_ID)
+            )
+        """).collect()
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+    
+    st.markdown("---")
+    
+    # Scan Mode Selection
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown("### 🎯 Select Scan Scope")
+    with col2:
+        scan_mode = st.selectbox(
+            "Scan Mode",
+            ["Pattern + AI", "Pattern Only", "AI Only"],
+            help="Pattern+AI: Best accuracy (slower) | Pattern Only: Fast | AI Only: Experimental"
+        )
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        try:
+            databases = session.sql("SHOW DATABASES").collect()
+            db_list = [row['name'] for row in databases]
+            selected_db = st.selectbox("Select Database *", db_list, key="scan_db")
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            selected_db = None
+    
+    with col2:
+        if selected_db:
+            try:
+                schemas = session.sql(f"SHOW SCHEMAS IN DATABASE {selected_db}").collect()
+                schema_list = [row['name'] for row in schemas]
+                selected_schema = st.selectbox("Select Schema *", schema_list, key="scan_schema")
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                selected_schema = None
+        else:
+            selected_schema = None
+    
+    if selected_db and selected_schema:
+        st.success(f"📍 **Scan Scope:** `{selected_db}.{selected_schema}` | **Mode:** {scan_mode}")
+        
+        st.markdown("---")
+        
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            start_scan = st.button("🤖 Start Intelligent Scan", type="primary", use_container_width=True)
+        with col2:
+            preview_tables = st.button("👁️ Preview Tables", use_container_width=True)
+        
+        if preview_tables:
+            try:
+                preview_query = f"""
+                SELECT TABLE_NAME, COUNT(*) as COLUMN_COUNT
+                FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = '{selected_schema}'
+                GROUP BY TABLE_NAME
+                ORDER BY TABLE_NAME
+                """
+                df_preview = session.sql(preview_query).to_pandas()
+                
+                if len(df_preview) > 0:
+                    st.info(f"📊 Found **{len(df_preview)}** tables with **{df_preview['COLUMN_COUNT'].sum()}** columns")
+                    st.dataframe(df_preview, use_container_width=True, height=300)
+                else:
+                    st.warning(f"No tables found")
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+        
+        if start_scan:
+            scan_run_id = generate_scan_run_id()
+            
+            with st.spinner(f"🤖 {'Intelligent' if 'AI' in scan_mode else 'Pattern'} scanning in progress..."):
+                try:
+                    # Get columns
+                    columns_query = f"""
+                    SELECT TABLE_CATALOG as DATABASE_NAME, TABLE_SCHEMA as SCHEMA_NAME,
+                           TABLE_NAME, COLUMN_NAME, DATA_TYPE
+                    FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = '{selected_schema}'
+                    ORDER BY TABLE_NAME, ORDINAL_POSITION
+                    """
+                    
+                    df_columns = session.sql(columns_query).to_pandas()
+                    
+                    if len(df_columns) == 0:
+                        st.warning(f"⚠️ No tables found")
+                    else:
+                        st.info(f"📊 Scanning **{len(df_columns)}** columns across **{df_columns['TABLE_NAME'].nunique()}** tables")
+                        
+                        df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+                        
+                        if len(df_ref) == 0:
+                            st.error("❌ No CDE reference patterns found")
+                        else:
+                            # Get pattern rules
+                            try:
+                                df_patterns = session.table("CDE_PATTERN_RULES").filter(F.col("IS_ACTIVE") == True).to_pandas()
+                            except:
+                                df_patterns = pd.DataFrame({
+                                    'PATTERN_ID': range(len(df_ref)),
+                                    'CDE_ID': df_ref['CDE_ID'],
+                                    'PATTERN_TYPE': 'EXACT',
+                                    'PATTERN_VALUE': df_ref['ATTRIBUTE_LOGICAL_NAME'],
+                                    'PATTERN_PRIORITY': 10
+                                })
+                            
+                            matches = []
+                            excluded_columns = []
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            # Prepare CDE list for semantic matching
+                            cde_list = df_ref['ATTRIBUTE_LOGICAL_NAME'].tolist()
+                            
+                            total_columns = len(df_columns)
+                            ai_matches_count = 0
+                            pattern_matches_count = 0
+                            excluded_count = 0
+                            
+                            for idx, col_row in df_columns.iterrows():
+                                progress_bar.progress((idx + 1) / total_columns)
+                                status_text.text(f"Scanning {idx + 1}/{total_columns}: {col_row['COLUMN_NAME']}")
+                                
+                                column_name = col_row['COLUMN_NAME']
+                                
+                                # ========================================
+                                # CHECK EXCLUSION LIST FIRST
+                                # ========================================
+                                is_excluded, exclusion_reason = is_excluded_column(column_name)
+                                
+                                if is_excluded:
+                                    excluded_count += 1
+                                    excluded_columns.append({
+                                        'COLUMN_NAME': column_name,
+                                        'TABLE_NAME': col_row['TABLE_NAME'],
+                                        'REASON': exclusion_reason
+                                    })
+                                    continue  # Skip this column
+                                
+                                pattern_matched = False
+                                
+                                # PATTERN MATCHING (if enabled)
+                                if scan_mode in ["Pattern + AI", "Pattern Only"]:
+                                    for _, pattern_row in df_patterns.iterrows():
+                                        if match_pattern(column_name, pattern_row['PATTERN_TYPE'], pattern_row['PATTERN_VALUE']):
+                                            cde_data = df_ref[df_ref['CDE_ID'] == pattern_row['CDE_ID']].iloc[0]
+                                            
+                                            match_score = 100.0 if pattern_row['PATTERN_TYPE'] == 'EXACT' else 80.0
+                                            
+                                            # Use AI for reasoning if in AI mode
+                                            if scan_mode == "Pattern + AI":
+                                                match_reason = generate_intelligent_reasoning(
+                                                    column_name, col_row['TABLE_NAME'], 
+                                                    cde_data['ATTRIBUTE_LOGICAL_NAME'],
+                                                    cde_data['DEFINITION'],
+                                                    col_row['DATA_TYPE'],
+                                                    cde_data['IS_PII']
+                                                )
+                                            else:
+                                                match_reason = f"Pattern match: {pattern_row['PATTERN_TYPE']} - {cde_data['DEFINITION'][:150]}"
+                                            
+                                            matches.append({
+                                                'SCAN_RUN_ID': scan_run_id,
+                                                'DATABASE_NAME': col_row['DATABASE_NAME'],
+                                                'SCHEMA_NAME': col_row['SCHEMA_NAME'],
+                                                'TABLE_NAME': col_row['TABLE_NAME'],
+                                                'COLUMN_NAME': col_row['COLUMN_NAME'],
+                                                'DATA_TYPE': col_row['DATA_TYPE'],
+                                                'MATCHED_CDE_ID': int(cde_data['CDE_ID']),
+                                                'MATCHED_DOMAIN': cde_data['DOMAIN'],
+                                                'MATCHED_TAG': cde_data['TAG'],
+                                                'MATCHED_ATTRIBUTE_LOGICAL_NAME': cde_data['ATTRIBUTE_LOGICAL_NAME'],
+                                                'MATCHED_IS_PII': cde_data['IS_PII'],
+                                                'MATCHED_DEFINITION': cde_data['DEFINITION'],
+                                                'PATTERN_ID': int(pattern_row['PATTERN_ID']) if 'PATTERN_ID' in pattern_row else None,
+                                                'PATTERN_TYPE': pattern_row['PATTERN_TYPE'],
+                                                'PATTERN_VALUE': pattern_row['PATTERN_VALUE'],
+                                                'MATCH_SCORE': match_score,
+                                                'MATCH_REASON': match_reason,
+                                                'MATCH_METHOD': 'Pattern',
+                                                'AI_VALIDATED': scan_mode == "Pattern + AI"
+                                            })
+                                            pattern_matched = True
+                                            pattern_matches_count += 1
+                                            break
+                                
+                                # AI SEMANTIC MATCHING (if enabled and no pattern match)
+                                if not pattern_matched and scan_mode in ["Pattern + AI", "AI Only"]:
+                                    context = f"Table: {col_row['TABLE_NAME']}, Type: {col_row['DATA_TYPE']}"
+                                    semantic_match_result = semantic_column_match(column_name, cde_list, context)
+                                    
+                                    if semantic_match_result and semantic_match_result in cde_list:
+                                        cde_data = df_ref[df_ref['ATTRIBUTE_LOGICAL_NAME'] == semantic_match_result].iloc[0]
+                                        
+                                        match_reason = generate_intelligent_reasoning(
+                                            column_name, col_row['TABLE_NAME'],
+                                            cde_data['ATTRIBUTE_LOGICAL_NAME'],
+                                            cde_data['DEFINITION'],
+                                            col_row['DATA_TYPE'],
+                                            cde_data['IS_PII']
+                                        )
+                                        
+                                        matches.append({
+                                            'SCAN_RUN_ID': scan_run_id,
+                                            'DATABASE_NAME': col_row['DATABASE_NAME'],
+                                            'SCHEMA_NAME': col_row['SCHEMA_NAME'],
+                                            'TABLE_NAME': col_row['TABLE_NAME'],
+                                            'COLUMN_NAME': col_row['COLUMN_NAME'],
+                                            'DATA_TYPE': col_row['DATA_TYPE'],
+                                            'MATCHED_CDE_ID': int(cde_data['CDE_ID']),
+                                            'MATCHED_DOMAIN': cde_data['DOMAIN'],
+                                            'MATCHED_TAG': cde_data['TAG'],
+                                            'MATCHED_ATTRIBUTE_LOGICAL_NAME': cde_data['ATTRIBUTE_LOGICAL_NAME'],
+                                            'MATCHED_IS_PII': cde_data['IS_PII'],
+                                            'MATCHED_DEFINITION': cde_data['DEFINITION'],
+                                            'PATTERN_ID': None,
+                                            'PATTERN_TYPE': 'AI_SEMANTIC',
+                                            'PATTERN_VALUE': semantic_match_result,
+                                            'MATCH_SCORE': 75.0,
+                                            'MATCH_REASON': match_reason,
+                                            'MATCH_METHOD': 'AI Semantic',
+                                            'AI_VALIDATED': True
+                                        })
+                                        ai_matches_count += 1
+                            
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            if len(matches) > 0:
+                                # Auto-save
+                                try:
+                                    for match in matches:
+                                        def_clean = match['MATCHED_DEFINITION'].replace("'", "''") if match['MATCHED_DEFINITION'] else ''
+                                        reason_clean = match['MATCH_REASON'].replace("'", "''")
+                                        
+                                        insert_query = f"""
+                                        INSERT INTO CDE_SCAN_RESULTS (
+                                            SCAN_RUN_ID, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, DATA_TYPE,
+                                            MATCHED_CDE_ID, MATCHED_DOMAIN, MATCHED_TAG, MATCHED_ATTRIBUTE_LOGICAL_NAME,
+                                            MATCHED_IS_PII, MATCHED_DEFINITION, PATTERN_ID, PATTERN_TYPE, PATTERN_VALUE,
+                                            MATCH_SCORE, MATCH_REASON, MATCH_METHOD, AI_VALIDATED
+                                        ) VALUES (
+                                            '{match['SCAN_RUN_ID']}', '{match['DATABASE_NAME']}', '{match['SCHEMA_NAME']}',
+                                            '{match['TABLE_NAME']}', '{match['COLUMN_NAME']}', '{match['DATA_TYPE']}',
+                                            {match['MATCHED_CDE_ID']}, '{match['MATCHED_DOMAIN']}', '{match['MATCHED_TAG']}',
+                                            '{match['MATCHED_ATTRIBUTE_LOGICAL_NAME']}', '{match['MATCHED_IS_PII']}', '{def_clean}',
+                                            {match['PATTERN_ID'] if match['PATTERN_ID'] else 'NULL'}, '{match['PATTERN_TYPE']}',
+                                            '{match['PATTERN_VALUE']}', {match['MATCH_SCORE']}, '{reason_clean}',
+                                            '{match['MATCH_METHOD']}', {match['AI_VALIDATED']}
+                                        )
+                                        """
+                                        session.sql(insert_query).collect()
+                                    
+                                    st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                                    st.markdown(f"### ✅ Scan Complete!")
+                                    st.markdown(f"**Total CDEs Found:** {len(matches)}")
+                                    st.markdown(f"**Pattern Matches:** {pattern_matches_count} | **AI Matches:** {ai_matches_count}")
+                                    st.markdown(f"**Excluded Columns:** {excluded_count} (audit/system columns)")
+                                    st.markdown('</div>', unsafe_allow_html=True)
+                                    
+                                except Exception as save_error:
+                                    st.warning(f"⚠️ Found {len(matches)} but save failed: {str(save_error)}")
+                                
+                                df_matches = pd.DataFrame(matches)
+                                
+                                # Summary metrics
+                                col1, col2, col3, col4, col5 = st.columns(5)
+                                with col1:
+                                    st.metric("CDEs Found", len(df_matches))
+                                with col2:
+                                    st.metric("PII Elements", len(df_matches[df_matches['MATCHED_IS_PII'] == 'Y']))
+                                with col3:
+                                    st.metric("Tables Affected", df_matches['TABLE_NAME'].nunique())
+                                with col4:
+                                    st.metric("AI Matches", ai_matches_count)
+                                with col5:
+                                    st.metric("Excluded", excluded_count, help="Audit/system columns filtered out")
+                                
+                                # Show excluded columns summary
+                                if excluded_count > 0:
+                                    with st.expander(f"🚫 View {excluded_count} Excluded Columns"):
+                                        df_excluded = pd.DataFrame(excluded_columns)
+                                        st.dataframe(df_excluded, use_container_width=True)
+                                        st.caption("These columns were filtered out as audit/system columns. To modify exclusions, update CDE_EXCLUSION_PATTERNS table.")
+                                
+                                st.markdown("---")
+                                st.markdown("### 📋 Scan Results")
+                                
+                                # Display with method badges
+                                for idx, row in df_matches.iterrows():
+                                    method_badge = "🤖 AI" if row['MATCH_METHOD'] == 'AI Semantic' else "📐 Pattern"
+                                    pii_icon = "🔴" if row['MATCHED_IS_PII'] == 'Y' else "🟢"
+                                    
+                                    with st.expander(
+                                        f"{pii_icon} {method_badge} | {row['TABLE_NAME']}.{row['COLUMN_NAME']} → {row['MATCHED_ATTRIBUTE_LOGICAL_NAME']}"
+                                    ):
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.write(f"**Domain:** {row['MATCHED_DOMAIN']}")
+                                            st.write(f"**Tag:** {row['MATCHED_TAG']}")
+                                            st.write(f"**Data Type:** {row['DATA_TYPE']}")
+                                            st.write(f"**Is PII:** {row['MATCHED_IS_PII']}")
+                                        with col2:
+                                            st.write(f"**Match Method:** {row['MATCH_METHOD']}")
+                                            st.write(f"**Pattern Type:** {row['PATTERN_TYPE']}")
+                                            st.write(f"**Match Score:** {row['MATCH_SCORE']:.0f}%")
+                                            st.write(f"**AI Validated:** {'Yes' if row['AI_VALIDATED'] else 'No'}")
+                                        
+                                        st.markdown("**🧠 Intelligent Match Reasoning:**")
+                                        st.info(row['MATCH_REASON'])
+                                
+                                st.markdown("---")
+                                csv = df_matches.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 Download Results as CSV",
+                                    data=csv,
+                                    file_name=f"cde_scan_{scan_run_id}.csv",
+                                    mime="text/csv"
+                                )
+                            else:
+                                st.warning("⚠️ No CDEs found")
+                
+                except Exception as e:
+                    st.error(f"❌ Error during scan: {str(e)}")
+                    st.exception(e)
+
+# ==================== SCREEN 3: CDE FINDINGS & ANALYSIS ====================
+elif page == "📊 CDE Findings & Analysis":
+    st.markdown('<div class="main-header">📊 CDE Findings & Analysis</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 AI-ENHANCED</span>', unsafe_allow_html=True)
+    
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🔄 Refresh Data", type="secondary"):
+            st.rerun()
+    
+    try:
+        df_results = session.sql("SELECT * FROM CDE_SCAN_RESULTS ORDER BY SCAN_DATE DESC").to_pandas()
+        
+        if len(df_results) == 0:
+            st.info("ℹ️ No scan results found. Please run a CDE scan first.")
+        else:
+            # Summary metrics
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                st.metric("Total CDEs", len(df_results))
+            with col2:
+                st.metric("PII Elements", len(df_results[df_results['MATCHED_IS_PII'] == 'Y']))
+            with col3:
+                st.metric("Tables", df_results['TABLE_NAME'].nunique())
+            with col4:
+                ai_count = len(df_results[df_results['MATCH_METHOD'] == 'AI Semantic']) if 'MATCH_METHOD' in df_results.columns else 0
+                st.metric("AI Matches", ai_count)
+            with col5:
+                avg_score = df_results['MATCH_SCORE'].mean() if 'MATCH_SCORE' in df_results.columns else 0
+                st.metric("Avg Score", f"{avg_score:.0f}%")
+            
+            st.markdown("---")
+            
+            # Filters
+            st.markdown("### 🔍 Filter Results")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                filter_domain = st.multiselect("Domain", options=sorted(df_results['MATCHED_DOMAIN'].dropna().unique()), default=[])
+            with col2:
+                filter_pii = st.multiselect("PII Status", options=['Y', 'N'], default=[])
+            with col3:
+                filter_database = st.multiselect("Database", options=sorted(df_results['DATABASE_NAME'].unique()), default=[])
+            with col4:
+                if 'MATCH_METHOD' in df_results.columns:
+                    filter_method = st.multiselect("Match Method", options=sorted(df_results['MATCH_METHOD'].unique()), default=[])
+                else:
+                    filter_method = []
+            
+            # Apply filters
+            filtered_df = df_results.copy()
+            if filter_domain:
+                filtered_df = filtered_df[filtered_df['MATCHED_DOMAIN'].isin(filter_domain)]
+            if filter_pii:
+                filtered_df = filtered_df[filtered_df['MATCHED_IS_PII'].isin(filter_pii)]
+            if filter_database:
+                filtered_df = filtered_df[filtered_df['DATABASE_NAME'].isin(filter_database)]
+            if filter_method and 'MATCH_METHOD' in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df['MATCH_METHOD'].isin(filter_method)]
+            
+            st.markdown("---")
+            st.info(f"Showing **{len(filtered_df)}** of **{len(df_results)}** scan results")
+            
+            # Display results
+            st.markdown("### 📋 Detailed Results")
+            
+            if len(filtered_df) > 0:
+                for idx, row in filtered_df.head(50).iterrows():
+                    method_badge = f"🤖 {row.get('MATCH_METHOD', 'Pattern')}" if 'MATCH_METHOD' in row else "📐 Pattern"
+                    pii_icon = "🔴 PII" if row['MATCHED_IS_PII'] == 'Y' else "🟢 Non-PII"
+                    
+                    with st.expander(f"{pii_icon} | {method_badge} | {row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}"):
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write(f"**🏢 Domain:** {row['MATCHED_DOMAIN']}")
+                            st.write(f"**🏷️ Tag:** {row['MATCHED_TAG']}")
+                            st.write(f"**📝 Attribute:** {row['MATCHED_ATTRIBUTE_LOGICAL_NAME']}")
+                            st.write(f"**💾 Data Type:** {row['DATA_TYPE']}")
+                        
+                        with col2:
+                            st.write(f"**🎯 Match Method:** {row.get('MATCH_METHOD', 'Pattern')}")
+                            st.write(f"**📊 Match Score:** {row['MATCH_SCORE']:.0f}%")
+                            st.write(f"**🤖 AI Validated:** {row.get('AI_VALIDATED', False)}")
+                            st.write(f"**📅 Scan Date:** {row['SCAN_DATE']}")
+                        
+                        st.markdown("**🧠 AI-Generated Match Reasoning:**")
+                        st.success(row['MATCH_REASON'])
+                
+                if len(filtered_df) > 50:
+                    st.warning(f"Showing first 50 of {len(filtered_df)} results. Use filters to narrow down.")
+            
+            # Download
+            st.markdown("---")
+            csv = filtered_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Filtered Results",
+                data=csv,
+                file_name=f"cde_findings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+            
+            # Analysis
+            st.markdown("---")
+            st.markdown("### 📊 Analysis")
+            
+            tab1, tab2, tab3 = st.tabs(["Domain Breakdown", "Match Methods", "PII Summary"])
+            
+            with tab1:
+                domain_counts = filtered_df.groupby('MATCHED_DOMAIN').size().reset_index(name='Count')
+                domain_counts = domain_counts.sort_values('Count', ascending=False)
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.bar_chart(domain_counts.set_index('MATCHED_DOMAIN'))
+                with col2:
+                    st.dataframe(domain_counts, use_container_width=True)
+            
+            with tab2:
+                if 'MATCH_METHOD' in filtered_df.columns:
+                    method_counts = filtered_df.groupby('MATCH_METHOD').size().reset_index(name='Count')
+                    st.bar_chart(method_counts.set_index('MATCH_METHOD'))
+                else:
+                    st.info("Match method data not available")
+            
+            with tab3:
+                pii_summary = filtered_df.groupby(['MATCHED_DOMAIN', 'MATCHED_IS_PII']).size().reset_index(name='Count')
+                pii_pivot = pii_summary.pivot(index='MATCHED_DOMAIN', columns='MATCHED_IS_PII', values='Count').fillna(0)
+                st.dataframe(pii_pivot, use_container_width=True)
+    
+    except Exception as e:
+        st.error(f"❌ Error loading findings: {str(e)}")
+
+# ==================== SCREEN 4: ASK CORTEX AI ====================
+elif page == "💬 Ask Cortex AI":
+    st.markdown('<div class="main-header">💬 Ask Cortex AI</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 NATURAL LANGUAGE Q&A</span>', unsafe_allow_html=True)
+    
+    st.markdown("""
+    Ask questions about your CDE scan results in natural language. Cortex AI will analyze your data and provide insights.
+    """)
+    
+    st.markdown("---")
+    
+    # Load context
+    try:
+        df_results = session.sql("SELECT * FROM CDE_SCAN_RESULTS ORDER BY SCAN_DATE DESC LIMIT 1000").to_pandas()
+        df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+        
+        context_summary = f"""
+        AVAILABLE DATA:
+        - Total CDE Definitions: {len(df_ref)}
+        - Total Scan Results: {len(df_results)}
+        - Databases Scanned: {df_results['DATABASE_NAME'].nunique() if len(df_results) > 0 else 0}
+        - PII Elements Found: {len(df_results[df_results['MATCHED_IS_PII'] == 'Y']) if len(df_results) > 0 else 0}
+        - Domains: {', '.join(df_ref['DOMAIN'].unique())}
+        """
+        
+        st.info(context_summary)
+        
+        st.markdown("---")
+        st.markdown("### 🤖 Ask Your Question")
+        
+        # Example questions
+        with st.expander("📝 Example Questions"):
+            st.markdown("""
+            - Which tables contain the most PII data?
+            - What are the most common CDEs found in my databases?
+            - How many Social Security Number fields were detected?
+            - Which domains have the highest risk data?
+            - Show me all financial CDEs found in the PROD database
+            - What compliance tags are associated with PII data?
+            """)
+        
+        user_question = st.text_area(
+            "Your Question:",
+            placeholder="e.g., Which tables contain Social Security Numbers?",
+            height=100
+        )
+        
+        if st.button("🤖 Ask Cortex AI", type="primary"):
+            if user_question:
+                with st.spinner("🤖 Cortex AI is thinking..."):
+                    # Prepare detailed context
+                    if len(df_results) > 0:
+                        sample_results = df_results.head(100)[['DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME', 
+                                                                'COLUMN_NAME', 'MATCHED_DOMAIN', 'MATCHED_TAG',
+                                                                'MATCHED_ATTRIBUTE_LOGICAL_NAME', 'MATCHED_IS_PII']].to_string()
+                    else:
+                        sample_results = "No scan results available yet."
+                    
+                    prompt = f"""You are a data governance analyst with access to CDE scan results.
+                    
+                    CONTEXT:
+                    {context_summary}
+                    
+                    SAMPLE SCAN RESULTS (first 100 records):
+                    {sample_results}
+                    
+                    USER QUESTION: {user_question}
+                    
+                    Provide a helpful, accurate answer based on the data above. If you need to make assumptions, state them clearly.
+                    Be specific with numbers, table names, and column names when possible.
+                    Format your response in a clear, structured way.
+                    """
+                    
+                    try:
+                        answer = call_cortex(prompt, 'mixtral-8x7b')
+                        
+                        st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                        st.markdown("### 🤖 Cortex AI Response:")
+                        st.markdown(answer)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+            else:
+                st.warning("Please enter a question")
+    
+    except Exception as e:
+        st.error(f"Error loading data: {str(e)}")
 
 # Footer
-st.markdown("---")
-st.caption("Data Validation Dashboard | Powered by Snowflake")
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📊 Statistics")
+try:
+    ref_count = session.sql("SELECT COUNT(*) as CNT FROM CDE_REFERENCE WHERE IS_ACTIVE = TRUE").collect()[0]['CNT']
+    scan_count = session.sql("SELECT COUNT(*) as CNT FROM CDE_SCAN_RESULTS").collect()[0]['CNT']
+    st.sidebar.metric("CDE Definitions", ref_count)
+    st.sidebar.metric("Scan Results", scan_count)
+except:
+    pass
+
+st.sidebar.markdown("---")
+st.sidebar.caption("🤖 Powered by Snowflake Cortex AI")
+st.sidebar.caption("Built with ❤️ for Data Governance")
