@@ -140,7 +140,7 @@ Common technical columns: created_at, updated_by, record_id, version, etl_batch_
 Answer ONLY: YES or NO"""
     
     try:
-        result = call_cortex(prompt, 'mistral-7b')
+        result = call_cortex(prompt, model)
         return 'YES' in result.upper()
     except:
         return False
@@ -192,7 +192,7 @@ def generate_definition(attribute_name, domain, tag):
     except Exception as e:
         return f"Error generating definition: {str(e)}"
 
-def semantic_column_match(column_name, cde_list, context=""):
+def semantic_column_match(column_name, cde_list, context="", model='mixtral-8x7b'):
     """Find semantic matches using Cortex with strict validation"""
     cde_sample = cde_list[:20]  # Limit for token size
     
@@ -223,13 +223,13 @@ def semantic_column_match(column_name, cde_list, context=""):
     """
     
     try:
-        result = call_cortex(prompt, 'mistral-7b')
+        result = call_cortex(prompt, model)
         result = result.strip().strip('"').strip("'")
         return result if result != "NONE" else None
     except:
         return None
 
-def generate_intelligent_reasoning(column_name, table_name, matched_cde, definition, data_type, is_pii):
+def generate_intelligent_reasoning(column_name, table_name, matched_cde, definition, data_type, is_pii, model='mixtral-8x7b'):
     """Generate intelligent match reasoning using Cortex with strict validation"""
     prompt = f"""You are a strict data governance analyst. Critically evaluate this CDE match:
     
@@ -259,12 +259,12 @@ def generate_intelligent_reasoning(column_name, table_name, matched_cde, definit
     """
     
     try:
-        result = call_cortex(prompt, 'mixtral-8x7b')
+        result = call_cortex(prompt, model)
         return result.strip()
     except Exception as e:
         return f"Standard match based on pattern matching. {definition[:100]}"
 
-def validate_match_quality(column_name, table_name, matched_cde, definition):
+def validate_match_quality(column_name, table_name, matched_cde, definition, model='mixtral-8x7b'):
     """AI validation of match quality"""
     prompt = f"""You are a data quality validator.
     
@@ -761,16 +761,80 @@ elif page == "🔍 CDE Scan (Intelligent)":
     
     st.markdown("---")
     
-    # Scan Mode Selection
-    col1, col2 = st.columns([3, 1])
+    # Scan Configuration
+    st.markdown("### ⚙️ Scan Configuration")
+    
+    col1, col2, col3 = st.columns(3)
+    
     with col1:
-        st.markdown("### 🎯 Select Scan Scope")
-    with col2:
         scan_mode = st.selectbox(
             "Scan Mode",
             ["Pattern + AI", "Pattern Only", "AI Only"],
             help="Pattern+AI: Best accuracy (slower) | Pattern Only: Fast | AI Only: Experimental"
         )
+    
+    with col2:
+        # Get available LLM models from Snowflake account
+        try:
+            available_models = session.sql("""
+                SHOW MODELS IN ACCOUNT
+            """).collect()
+            
+            # Extract model names - filter for Cortex models
+            model_list = []
+            for row in available_models:
+                model_name = row['name']
+                if any(x in model_name.lower() for x in ['mistral', 'mixtral', 'llama', 'claude', 'gemma', 'reka']):
+                    model_list.append(model_name)
+            
+            # If no models found via SHOW MODELS, use common available models
+            if not model_list:
+                model_list = [
+                    'mistral-7b',
+                    'mixtral-8x7b', 
+                    'llama3-8b',
+                    'llama3-70b',
+                    'llama3.1-8b',
+                    'llama3.1-70b',
+                    'llama3.1-405b',
+                    'reka-flash',
+                    'gemma-7b'
+                ]
+        except:
+            # Default models if query fails
+            model_list = [
+                'mistral-7b',
+                'mixtral-8x7b',
+                'llama3-8b',
+                'llama3-70b',
+                'llama3.1-8b',
+                'llama3.1-70b',
+                'llama3.1-405b',
+                'reka-flash',
+                'gemma-7b'
+            ]
+        
+        selected_llm = st.selectbox(
+            "LLM Model for AI Matching",
+            model_list,
+            index=1 if 'mixtral-8x7b' in model_list else 0,
+            help="Select the Cortex AI model to use for semantic matching and validation"
+        )
+    
+    with col3:
+        ai_confidence = st.slider(
+            "AI Confidence Threshold",
+            min_value=70,
+            max_value=95,
+            value=85,
+            step=5,
+            help="Minimum confidence for AI matches (higher = fewer but more accurate matches)"
+        )
+    
+    st.markdown("---")
+    
+    # Database and Schema Selection
+    st.markdown("### 🎯 Select Scan Scope")
     
     col1, col2 = st.columns(2)
     
@@ -913,7 +977,8 @@ elif page == "🔍 CDE Scan (Intelligent)":
                                                     cde_data['ATTRIBUTE_LOGICAL_NAME'],
                                                     cde_data['DEFINITION'],
                                                     col_row['DATA_TYPE'],
-                                                    cde_data['IS_PII']
+                                                    cde_data['IS_PII'],
+                                                    selected_llm
                                                 )
                                             else:
                                                 match_reason = f"Pattern match: {pattern_row['PATTERN_TYPE']} - {cde_data['DEFINITION'][:150]}"
@@ -946,7 +1011,7 @@ elif page == "🔍 CDE Scan (Intelligent)":
                                 # AI SEMANTIC MATCHING (if enabled and no pattern match)
                                 if not pattern_matched and scan_mode in ["Pattern + AI", "AI Only"]:
                                     context = f"Table: {col_row['TABLE_NAME']}, Type: {col_row['DATA_TYPE']}"
-                                    semantic_match_result = semantic_column_match(column_name, cde_list, context)
+                                    semantic_match_result = semantic_column_match(column_name, cde_list, context, selected_llm)
                                     
                                     if semantic_match_result and semantic_match_result in cde_list:
                                         cde_data = df_ref[df_ref['ATTRIBUTE_LOGICAL_NAME'] == semantic_match_result].iloc[0]
@@ -956,7 +1021,8 @@ elif page == "🔍 CDE Scan (Intelligent)":
                                             cde_data['ATTRIBUTE_LOGICAL_NAME'],
                                             cde_data['DEFINITION'],
                                             col_row['DATA_TYPE'],
-                                            cde_data['IS_PII']
+                                            cde_data['IS_PII'],
+                                            selected_llm
                                         )
                                         
                                         matches.append({
@@ -1120,6 +1186,7 @@ elif page == "📊 CDE Findings & Analysis":
             # Filters
             st.markdown("### 🔍 Filter Results")
             
+            # First row of filters
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
@@ -1131,26 +1198,70 @@ elif page == "📊 CDE Findings & Analysis":
                     domain_options = sorted(df_results['MATCHED_DOMAIN'].dropna().unique())
                 
                 filter_domain = st.multiselect("Domain", options=domain_options, default=[])
+            
             with col2:
-                filter_pii = st.multiselect("PII Status", options=['Y', 'N'], default=[])
+                # Get all tags from reference table
+                try:
+                    all_tags = session.sql("SELECT DISTINCT TAG FROM CDE_REFERENCE WHERE IS_ACTIVE = TRUE ORDER BY TAG").to_pandas()
+                    tag_options = all_tags['TAG'].tolist() if len(all_tags) > 0 else sorted(df_results['MATCHED_TAG'].dropna().unique())
+                except:
+                    tag_options = sorted(df_results['MATCHED_TAG'].dropna().unique())
+                
+                filter_tag = st.multiselect("Tag", options=tag_options, default=[])
+            
             with col3:
-                filter_database = st.multiselect("Database", options=sorted(df_results['DATABASE_NAME'].unique()), default=[])
+                filter_pii = st.multiselect("PII Status", options=['Y', 'N'], default=[])
+            
             with col4:
                 if 'MATCH_METHOD' in df_results.columns:
                     filter_method = st.multiselect("Match Method", options=sorted(df_results['MATCH_METHOD'].unique()), default=[])
                 else:
                     filter_method = []
             
+            # Second row of filters
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                filter_database = st.multiselect("Database", options=sorted(df_results['DATABASE_NAME'].unique()), default=[])
+            
+            with col2:
+                filter_schema = st.multiselect("Schema", options=sorted(df_results['SCHEMA_NAME'].unique()), default=[])
+            
+            with col3:
+                filter_table = st.multiselect("Table", options=sorted(df_results['TABLE_NAME'].unique()), default=[])
+            
+            with col4:
+                # Match score filter
+                score_range = st.slider(
+                    "Match Score Range",
+                    min_value=0,
+                    max_value=100,
+                    value=(0, 100),
+                    help="Filter by match score percentage"
+                )
+            
             # Apply filters
             filtered_df = df_results.copy()
             if filter_domain:
                 filtered_df = filtered_df[filtered_df['MATCHED_DOMAIN'].isin(filter_domain)]
+            if filter_tag:
+                filtered_df = filtered_df[filtered_df['MATCHED_TAG'].isin(filter_tag)]
             if filter_pii:
                 filtered_df = filtered_df[filtered_df['MATCHED_IS_PII'].isin(filter_pii)]
             if filter_database:
                 filtered_df = filtered_df[filtered_df['DATABASE_NAME'].isin(filter_database)]
+            if filter_schema:
+                filtered_df = filtered_df[filtered_df['SCHEMA_NAME'].isin(filter_schema)]
+            if filter_table:
+                filtered_df = filtered_df[filtered_df['TABLE_NAME'].isin(filter_table)]
             if filter_method and 'MATCH_METHOD' in filtered_df.columns:
                 filtered_df = filtered_df[filtered_df['MATCH_METHOD'].isin(filter_method)]
+            # Apply score range filter
+            if 'MATCH_SCORE' in filtered_df.columns:
+                filtered_df = filtered_df[
+                    (filtered_df['MATCH_SCORE'] >= score_range[0]) & 
+                    (filtered_df['MATCH_SCORE'] <= score_range[1])
+                ]
             
             st.markdown("---")
             st.info(f"Showing **{len(filtered_df)}** of **{len(df_results)}** scan results")
@@ -1449,7 +1560,6 @@ except:
 st.sidebar.markdown("---")
 st.sidebar.caption("🤖 Powered by Snowflake Cortex AI")
 st.sidebar.caption("Built with ❤️ for Data Governance")
-
 
 
 -- =========================================================
