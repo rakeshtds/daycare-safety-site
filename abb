@@ -1,0 +1,358 @@
+## **S3 Folder Structure for DMINE Data Lake**
+
+-----
+
+## **Landing Zone Structure (with Archive)**
+
+### **Active Landing Zone**
+
+```
+s3://bmo-dmine-datalake-prod-ca-central/landing/
+├── batch/
+│   ├── source=idp/
+│   │   ├── dataset=customer_profiles/
+│   │   │   ├── year=2024/
+│   │   │   │   ├── month=08/
+│   │   │   │   │   ├── day=26/
+│   │   │   │   │   │   └── idp_customer_profiles_20240826_001.parquet
+│   │   ├── dataset=transaction_history/
+│   │   └── dataset=risk_scores/
+│   ├── source=tsys/
+│   │   ├── dataset=card_transactions/
+│   │   │   ├── year=2024/month=08/day=26/
+│   │   │   │   └── tsys_card_transactions_20240826_batch.csv
+│   ├── source=mech/
+│   │   ├── dataset=banking_transactions/
+│   │   └── dataset=account_details/
+│   ├── source=ere/
+│   │   └── dataset=case_management/
+│   ├── source=pega/
+│   │   └── dataset=workflow_data/
+│   ├── source=servicenow/
+│   │   ├── dataset=incidents/
+│   │   └── dataset=case_records/
+│   ├── source=sailpoint/
+│   │   ├── dataset=user_identities/
+│   │   └── dataset=access_logs/
+│   └── source=sybaseiq/
+│       ├── dataset=fraud_cases/
+│       └── dataset=historical_alerts/
+│
+├── streaming/
+│   ├── source=tsys/
+│   │   ├── dataset=realtime_transactions/
+│   │   │   ├── year=2024/
+│   │   │   │   ├── month=08/
+│   │   │   │   │   ├── day=26/
+│   │   │   │   │   │   ├── hour=14/
+│   │   │   │   │   │   │   └── tsys_realtime_txn_20240826_140500.json
+│   │   ├── dataset=fraud_alerts/
+│   │   │   └── year=2024/month=08/day=26/hour=14/
+│   ├── source=kafka_feeds/
+│   │   └── dataset=transaction_stream/
+│   └── source=api_feeds/
+│       └── dataset=realtime_alerts/
+│
+└── _control/
+    ├── batch_manifests/
+    │   └── batch_control_20240826.json
+    ├── streaming_checkpoints/
+    │   └── stream_checkpoint_20240826_14.json
+    └── processing_status/
+        └── status_20240826.json
+```
+
+### **Landing Archive Zone**
+
+```
+s3://bmo-dmine-datalake-prod-ca-central/landing-archive/
+├── batch/
+│   ├── source=idp/
+│   │   ├── dataset=customer_profiles/
+│   │   │   ├── year=2024/
+│   │   │   │   ├── month=08/
+│   │   │   │   │   └── archived_idp_customer_profiles_202408.parquet.gz
+│   ├── source=tsys/
+│   └── source=servicenow/
+│
+├── streaming/
+│   ├── source=tsys/
+│   │   └── dataset=realtime_transactions/
+│   │       └── year=2024/month=08/
+│   │           └── archived_tsys_stream_202408.parquet.gz
+│
+└── _metadata/
+    └── archive_manifest_202408.json
+```
+
+**Archive Lifecycle:**
+
+- Landing files moved to archive after **7 days**
+- Archive retention: **90 days** before deletion
+- Compressed format (Gzip) for storage efficiency
+
+-----
+
+## **Staging Zone Structure**
+
+```
+s3://bmo-dmine-datalake-prod-ca-central/staging/
+├── domain=fraud_detection/
+│   ├── dataset=transaction_alerts/
+│   │   ├── processing_type=batch/
+│   │   │   ├── year=2024/month=08/day=26/
+│   │   │   │   └── fraud_detection_transaction_alerts_20240826_validated.parquet
+│   │   ├── processing_type=streaming/
+│   │   │   ├── year=2024/month=08/day=26/hour=14/
+│   │   │   │   └── fraud_detection_alerts_20240826_1400_processed.parquet
+│   │   └── _quality_reports/
+│   │       └── quality_check_20240826.json
+│   │
+│   ├── dataset=fraud_scores/
+│   │   ├── processing_type=batch/
+│   │   └── processing_type=streaming/
+│   │
+│   ├── dataset=risk_assessments/
+│   └── dataset=pattern_analysis/
+│
+├── domain=case_management/
+│   ├── dataset=investigations/
+│   │   ├── processing_type=batch/
+│   │   │   └── year=2024/month=08/day=26/
+│   │   └── source_system=servicenow/
+│   │       └── year=2024/month=08/day=26/
+│   ├── dataset=case_outcomes/
+│   └── dataset=evidence_tracking/
+│
+├── domain=customer_analytics/
+│   ├── dataset=customer_profiles/
+│   │   ├── processing_type=batch/
+│   │   │   ├── source_system=idp/
+│   │   │   └── source_system=sybaseiq/
+│   │   └── _versions/
+│   │       └── profile_version_history.parquet
+│   ├── dataset=behavior_patterns/
+│   └── dataset=risk_profiles/
+│
+├── domain=identity_access/
+│   ├── dataset=user_identities/
+│   │   ├── source_system=sailpoint/
+│   │   │   └── year=2024/month=08/day=26/
+│   │   └── processing_type=batch/
+│   ├── dataset=access_logs/
+│   └── dataset=entitlements/
+│
+├── domain=compliance/
+│   ├── dataset=audit_trails/
+│   ├── dataset=regulatory_reports/
+│   └── dataset=data_lineage/
+│
+└── _control/
+    ├── transformation_logs/
+    ├── data_quality_metrics/
+    └── processing_checkpoints/
+```
+
+-----
+
+## **RAW Zone (Curated) Structure**
+
+```
+s3://bmo-dmine-datalake-prod-ca-central/raw/
+├── domain=fraud_detection/
+│   ├── current/
+│   │   ├── transaction_alerts/
+│   │   │   └── fraud_detection_transaction_alerts_current.parquet
+│   │   ├── fraud_scores/
+│   │   └── risk_assessments/
+│   │
+│   ├── historical/
+│   │   ├── transaction_alerts/
+│   │   │   ├── year=2024/
+│   │   │   │   ├── month=08/
+│   │   │   │   │   └── fraud_alerts_202408_curated.parquet
+│   │   │   ├── year=2023/
+│   │   │   └── consolidated/
+│   │   │       └── fraud_alerts_all_time.parquet
+│   │
+│   ├── snapshots/
+│   │   └── transaction_alerts/
+│   │       ├── snapshot_date=2024-08-26/
+│   │       │   └── fraud_alerts_snapshot_20240826.parquet
+│   │       └── snapshot_date=2024-08-25/
+│   │
+│   └── aggregations/
+│       ├── daily/
+│       │   └── fraud_metrics_daily_20240826.parquet
+│       ├── weekly/
+│       └── monthly/
+│
+├── domain=case_management/
+│   ├── current/
+│   │   ├── active_investigations/
+│   │   ├── case_records/
+│   │   └── servicenow_incidents/
+│   ├── historical/
+│   │   └── closed_cases/
+│   │       └── year=2024/month=08/
+│   └── snapshots/
+│
+├── domain=customer_analytics/
+│   ├── current/
+│   │   ├── customer_profiles_360/
+│   │   ├── behavior_patterns/
+│   │   └── risk_segments/
+│   ├── historical/
+│   │   └── customer_history/
+│   └── aggregations/
+│       └── customer_lifetime_metrics.parquet
+│
+├── domain=identity_access/
+│   ├── current/
+│   │   ├── sailpoint_identities/
+│   │   ├── access_entitlements/
+│   │   └── active_sessions/
+│   └── historical/
+│       └── access_history/
+│           └── year=2024/month=08/
+│
+├── domain=compliance/
+│   ├── audit_trails/
+│   │   └── year=2024/month=08/
+│   ├── regulatory_reports/
+│   │   └── report_type=osfi/
+│   └── data_lineage/
+│
+└── _metadata/
+    ├── table_definitions/
+    ├── schema_versions/
+    └── refresh_timestamps/
+```
+
+-----
+
+## **File Naming Conventions**
+
+### **Landing Zone - Batch Files**
+
+```
+{source}_{dataset}_{yyyymmdd}_{sequence}_{loadtype}.{format}
+
+Examples:
+idp_customer_profiles_20240826_001_full.parquet
+tsys_card_transactions_20240826_002_delta.csv
+servicenow_incidents_20240826_001_incremental.json
+sailpoint_identities_20240826_001_snapshot.parquet
+```
+
+### **Landing Zone - Streaming Files**
+
+```
+{source}_{dataset}_{yyyymmdd}_{hhmmss}_{batchid}.{format}
+
+Examples:
+tsys_realtime_txn_20240826_140530_b001.json
+kafka_fraud_alerts_20240826_140532_b002.json
+api_transaction_stream_20240826_140535_b003.json
+```
+
+### **Staging Zone Files**
+
+```
+{domain}_{dataset}_{yyyymmdd}_{version}_{status}.parquet
+
+Examples:
+fraud_detection_transaction_alerts_20240826_v1_validated.parquet
+case_management_investigations_20240826_v2_enriched.parquet
+customer_analytics_profiles_20240826_v1_processed.parquet
+identity_access_sailpoint_20240826_v1_standardized.parquet
+```
+
+### **RAW Zone Files**
+
+```
+{domain}_{dataset}_{period}_{type}.parquet
+
+Examples:
+fraud_detection_alerts_202408_curated.parquet
+fraud_detection_alerts_current.parquet
+fraud_detection_alerts_snapshot_20240826.parquet
+case_management_servicenow_monthly_202408.parquet
+```
+
+-----
+
+## **Control Files & Metadata**
+
+### **Batch Control Manifest**
+
+```json
+{
+  "batch_id": "batch_20240826_001",
+  "source_system": "IDP",
+  "dataset": "customer_profiles",
+  "file_path": "s3://landing/batch/source=idp/dataset=customer_profiles/year=2024/month=08/day=26/",
+  "file_count": 3,
+  "total_records": 1500000,
+  "total_size_mb": 2500,
+  "arrival_timestamp": "2024-08-26T02:00:00Z",
+  "processing_status": "ready",
+  "checksum": "abc123def456"
+}
+```
+
+### **Streaming Checkpoint**
+
+```json
+{
+  "checkpoint_id": "stream_tsys_20240826_1400",
+  "source": "Kinesis:tsys-transactions",
+  "last_sequence_number": "49590338271490256608559692538361571095921294977",
+  "last_processing_time": "2024-08-26T14:05:30Z",
+  "records_processed": 15000,
+  "checkpoint_location": "s3://landing/streaming/source=tsys/dataset=realtime_transactions/year=2024/month=08/day=26/hour=14/"
+}
+```
+
+-----
+
+## **Storage Class & Lifecycle Policies**
+
+### **Landing Zone**
+
+```
+Active Files (Day 0-7):     S3 Standard
+Archive (Day 8-90):         S3 Glacier Instant Retrieval (Compressed)
+Post-Archive (Day 91+):     Delete (data moved to Staging/RAW)
+```
+
+### **Staging Zone**
+
+```
+Active (Day 0-30):          S3 Standard
+Warm (Day 31-90):           S3 Standard-IA
+Cold (Day 91-365):          S3 Glacier Flexible Retrieval
+Long-term (Day 366+):       S3 Glacier Deep Archive
+```
+
+### **RAW Zone**
+
+```
+Current (Always):           S3 Standard
+Historical (0-90 days):     S3 Intelligent-Tiering
+Historical (91-365 days):   S3 Glacier Instant Retrieval
+Compliance (1-7 years):     S3 Glacier Flexible Retrieval
+```
+
+-----
+
+## **Key Design Principles**
+
+1. **Separation by Processing Type**: Batch vs Streaming clearly separated
+1. **Source System Identification**: Every file traceable to source
+1. **Time-based Partitioning**: Optimized for query performance
+1. **Domain-based Organization**: Business-aligned structure in Staging/RAW
+1. **Archive Strategy**: Clear lifecycle with cost optimization
+1. **Control & Metadata**: Comprehensive tracking and audit capability
+
+This structure supports both Phase 1A (historical + operational) and Phase 1B (ServiceNow + SailPoint) data sources efficiently.​​​​​​​​​​​​​​​​
