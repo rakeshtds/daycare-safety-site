@@ -1,0 +1,871 @@
+# DMINE AWS Data Lake - S3 Bucket Structure & Encryption Strategy
+
+## Document Overview
+
+This document details the S3 bucket architecture, folder structure, and encryption implementation for the DMINE Phase 1 AWS Data Lake, ensuring secure data handling from on-premises sources to curated analytics-ready datasets.
+
+**Document Version**: 1.0  
+**Last Updated**: August 2024  
+**Classification**: Internal - BMO Confidential
+
+-----
+
+## 1. Executive Summary
+
+The DMINE AWS Data Lake implements a two-bucket architecture with comprehensive encryption strategy to ensure data security throughout the data lifecycle. The solution employs multiple encryption methods including PGP encryption for on-premises data transfer, AWS KMS encryption for data at rest, and dual KMS encryption for highly sensitive curated data.
+
+**Key Security Features:**
+
+- PGP encryption for on-premises to cloud data transfer
+- AWS KMS Customer Managed Keys (CMKs) for S3 encryption
+- Dual KMS encryption (application-level + S3 bucket-level) for sensitive data
+- Mutual TLS for data in transit
+- Comprehensive key management via AWS Secrets Manager
+
+-----
+
+## 2. S3 Bucket Architecture
+
+### 2.1 Two-Bucket Design
+
+#### **Bucket 1: Landing Zone (Bronze Layer)**
+
+```
+Bucket Name: s3://bmo-dmine-landing-prod-ca-central/
+Region: ca-central-1 (Canada Central)
+```
+
+**Purpose**: Initial data ingestion, validation, and temporary processing  
+**Encryption**: PGP for incoming files, KMS for processed data  
+**Retention**: Short-term (7-90 days with lifecycle policies)  
+**Data State**: Raw and validated data
+
+#### **Bucket 2: Standard Zone (Silver Layer)**
+
+```
+Bucket Name: s3://bmo-dmine-standard-prod-ca-central/
+Region: ca-central-1 (Canada Central)
+```
+
+**Purpose**: Curated, analytics-ready, business-aligned datasets  
+**Encryption**: Dual KMS encryption (KMS on KMS)  
+**Retention**: Long-term (7+ years for regulatory compliance)  
+**Data State**: Transformed, enriched, domain-organized
+
+-----
+
+## 3. Landing Zone Bucket Structure
+
+### 3.1 RAW Folder - PGP Encrypted Files
+
+```
+s3://bmo-dmine-landing-prod-ca-central/raw/
+├── batch/
+│   ├── source=idp/
+│   │   ├── dataset=customer_profiles/
+│   │   │   └── year=2024/month=08/day=26/
+│   │   │       └── idp_customer_profiles_20240826_001_raw.parquet.gpg
+│   │   ├── dataset=transaction_history/
+│   │   └── dataset=risk_scores/
+│   │
+│   ├── source=tsys/
+│   │   └── dataset=card_transactions/
+│   │       └── year=2024/month=08/day=26/
+│   │           └── tsys_card_transactions_20240826_raw.csv.gpg
+│   │
+│   ├── source=mech/
+│   ├── source=xim/
+│   ├── source=ere/
+│   ├── source=pega/
+│   ├── source=servicenow/
+│   │   ├── dataset=incidents/
+│   │   └── dataset=case_records/
+│   │
+│   ├── source=sailpoint/
+│   │   ├── dataset=user_identities/
+│   │   └── dataset=access_logs/
+│   │
+│   └── source=sybaseiq/
+│       └── dataset=fraud_cases_historical/
+│
+├── streaming/
+│   ├── source=tsys/
+│   │   └── dataset=realtime_transactions/
+│   │       └── year=2024/month=08/day=26/hour=14/
+│   │           └── tsys_realtime_20240826_140530_raw.json.kms
+│   │
+│   └── source=kafka/
+│       └── dataset=transaction_stream/
+│
+└── _control/
+    ├── manifests/
+    ├── checksums/
+    └── ingestion_logs/
+```
+
+**Encryption at RAW:**
+
+- **Batch Files**: PGP encrypted (.gpg extension) for on-premises sources
+- **Streaming Files**: KMS encrypted (no PGP needed)
+- **Use Case**: On-premises systems (IBM MQ, SFTP/FileX) transferring data
+- **File State**: Encrypted as received, awaiting decryption
+
+-----
+
+### 3.2 CURRENT Folder - KMS Encrypted (Validated)
+
+```
+s3://bmo-dmine-landing-prod-ca-central/current/
+├── batch/
+│   ├── source=idp/
+│   │   └── dataset=customer_profiles/
+│   │       └── year=2024/month=08/day=26/
+│   │           └── idp_customer_profiles_20240826_current.parquet
+│   │
+│   ├── source=servicenow/
+│   │   └── dataset=incidents/
+│   │       └── year=2024/month=08/day=26/
+│   │           └── servicenow_incidents_20240826_current.parquet
+│   │
+│   └── source=sailpoint/
+│       └── dataset=user_identities/
+│           └── year=2024/month=08/day=26/
+│               └── sailpoint_users_20240826_current.parquet
+│
+├── streaming/
+│   └── source=tsys/
+│       └── dataset=realtime_transactions/
+│           └── year=2024/month=08/day=26/hour=14/
+│               └── tsys_realtime_20240826_1400_current.parquet
+│
+└── _quality/
+    ├── validation_reports/
+    ├── data_profiling/
+    └── quality_metrics/
+```
+
+**Encryption at CURRENT:**
+
+- **Method**: AWS KMS with Customer Managed Keys (CMKs)
+- **Format**: Standardized to Parquet, decrypted from PGP, re-encrypted with KMS
+- **State**: Validated, quality-checked, ready for transformation
+- **Access**: IAM roles for Glue, Athena, Lambda with KMS decrypt permissions
+
+-----
+
+### 3.3 ARCHIVE Folder - Compressed & Encrypted
+
+```
+s3://bmo-dmine-landing-prod-ca-central/archive/
+├── batch/
+│   ├── source=idp/
+│   │   └── dataset=customer_profiles/
+│   │       └── year=2024/month=07/
+│   │           └── archived_idp_profiles_202407.parquet.gz
+│   │
+│   └── source=tsys/
+│       └── dataset=card_transactions/
+│           └── year=2024/month=07/
+│               └── archived_tsys_txn_202407.parquet.gz
+│
+└── _metadata/
+    └── archive_manifests/
+```
+
+**Encryption at ARCHIVE:**
+
+- **Method**: AWS KMS encryption + Gzip compression
+- **Retention**: 90 days before deletion
+- **Storage Class**: S3 Glacier Instant Retrieval
+- **Purpose**: Compliance backup, reprocessing capability
+
+-----
+
+## 4. Standard Zone Bucket Structure
+
+### 4.1 Domain-Based Organization with Dual KMS
+
+```
+s3://bmo-dmine-standard-prod-ca-central/
+│
+├── fraud_detection/
+│   ├── transaction_alerts/
+│   │   ├── batch/
+│   │   │   └── year=2024/month=08/day=26/
+│   │   │       └── fraud_transaction_alerts_20240826_standard.parquet
+│   │   ├── streaming/
+│   │   │   └── year=2024/month=08/day=26/hour=14/
+│   │   │       └── fraud_alerts_realtime_20240826_1400_standard.parquet
+│   │   └── consolidated/
+│   │
+│   ├── fraud_scores/
+│   │   ├── daily/
+│   │   ├── weekly/
+│   │   └── monthly/
+│   │
+│   └── risk_assessments/
+│
+├── case_management/
+│   ├── investigations/
+│   │   ├── active_cases/
+│   │   └── closed_cases/
+│   │
+│   ├── servicenow_incidents/
+│   │   ├── open_incidents/
+│   │   └── resolved_incidents/
+│   │
+│   └── evidence_tracking/
+│
+├── customer_analytics/
+│   ├── customer_profiles_360/
+│   │   ├── current_profiles/
+│   │   ├── profile_history/
+│   │   └── profile_snapshots/
+│   │
+│   ├── behavior_patterns/
+│   └── risk_segmentation/
+│
+├── identity_access/
+│   ├── sailpoint_identities/
+│   │   ├── active_users/
+│   │   └── user_history/
+│   │
+│   ├── access_entitlements/
+│   └── access_logs/
+│
+├── compliance/
+│   ├── audit_trails/
+│   ├── regulatory_reports/
+│   └── data_lineage/
+│
+└── _metadata/
+    ├── schema_definitions/
+    ├── transformation_rules/
+    └── quality_standards/
+```
+
+-----
+
+## 5. Encryption Strategy Details
+
+### 5.1 Data in Transit Encryption
+
+**Method**: Mutual TLS Encryption
+
+**Implementation:**
+
+- All data transfers use HTTPS with TLS 1.3
+- Secure transfer from on-premises to AWS
+- Certificate-based authentication
+- Encrypted channels for all API communications
+
+**Coverage:**
+
+- On-premises to S3 transfers
+- Glue job data movements
+- Lambda function invocations
+- Athena query results
+
+-----
+
+### 5.2 Data at Rest - S3 Bucket Encryption
+
+**Configuration:**
+
+```
+Encryption Algorithm: AES-256
+Key Management Service: AWS KMS
+Key Type: Customer Managed Keys (CMKs)
+Key Rotation: Automatic (Annual)
+Deployment: AWS CDK Infrastructure as Code
+```
+
+**Bucket-Level Settings:**
+
+- Default encryption enabled on all buckets
+- Server-side encryption with KMS CMKs
+- Encryption happens automatically on object upload
+- No client-side management required
+
+-----
+
+### 5.3 PGP Encryption (On-Premises Transfer)
+
+**Use Case**: For on-premises systems (IBM MQ, SFTP/FileX) transferring data to AWS
+
+**Encryption Method**: PGP (Pretty Good Privacy) - Asymmetric Encryption
+
+#### **Key Management:**
+
+**Public Key:**
+
+- **Location**: AWS Secrets Manager
+- **Purpose**: Encryption on FileX/on-premises side
+- **Access**: FileX team + AWS Lambda function
+- **Distribution**: Provided to FileX team for file encryption
+
+**Private Key:**
+
+- **Location**: AWS Secrets Manager (encrypted copy for Lambda)
+- **Original**: Retained by FileX team (on-premises secure storage)
+- **Purpose**: Decryption in AWS Lambda
+- **Access**: Lambda IAM role with Secrets Manager permissions
+
+#### **Process Flow:**
+
+```
+Step 1: FileX generates PGP public/private key pair
+    ↓
+Step 2: Public key stored in AWS Secrets Manager
+    ↓
+Step 3: On-premises system encrypts file with public key
+    ↓
+Step 4: Encrypted file transferred to S3 RAW (file.gpg)
+    ↓
+Step 5: S3 event triggers Lambda function
+    ↓
+Step 6: Lambda retrieves private key from Secrets Manager
+    ↓
+Step 7: Lambda decrypts PGP file
+    ↓
+Step 8: Lambda re-encrypts with KMS CMK
+    ↓
+Step 9: Store decrypted+KMS encrypted file in CURRENT folder
+    ↓
+Step 10: Delete original PGP file from RAW (lifecycle policy)
+```
+
+**Landing Zone PGP Processing:**
+
+- Data lands in S3 RAW encrypted with PGP
+- Lambda decrypts PGP before moving to curated zone
+- Curated zone uses dual KMS encryption (not PGP)
+
+-----
+
+### 5.4 Dual KMS Encryption (KMS on KMS)
+
+**Implementation**: Two layers of KMS encryption for maximum security
+
+#### **First Layer - S3 Bucket Encryption:**
+
+```
+Type: Server-Side Encryption
+Method: AWS KMS CMK
+Application: Automatic at bucket level
+Scope: All objects in Standard bucket
+Transparency: Transparent to applications
+```
+
+#### **Second Layer - Application-Level Encryption:**
+
+```
+Type: Client-Side Encryption
+Method: Additional KMS CMK via Lambda
+Application: Before S3 write operation
+Scope: Sensitive fields (PII, fraud scores)
+Purpose: Extra security for regulated data
+```
+
+#### **Access Control Requirements:**
+
+Services (Glue, Lambda, Athena) must have IAM permissions for:
+
+1. First KMS key (S3 bucket encryption)
+1. Second KMS key (application-level encryption)
+
+**Example IAM Policy:**
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "kms:Decrypt",
+    "kms:DescribeKey"
+  ],
+  "Resource": [
+    "arn:aws:kms:ca-central-1:account:key/bucket-cmk-id",
+    "arn:aws:kms:ca-central-1:account:key/app-cmk-id"
+  ]
+}
+```
+
+#### **Decryption Process:**
+
+```
+User/Service reads from Standard bucket
+    ↓
+S3 automatically decrypts first layer (bucket KMS)
+    ↓
+Application (Glue) decrypts second layer (app KMS)
+    ↓
+Data available in plaintext for processing
+    ↓
+Processing complete
+    ↓
+Application encrypts with app KMS
+    ↓
+S3 encrypts with bucket KMS
+    ↓
+Data stored with dual encryption
+```
+
+**When Dual KMS is Applied:**
+
+- Customer PII data
+- Fraud investigation records
+- Financial transaction details
+- Identity and access data
+- Any data classified as “Confidential” or “Restricted”
+
+-----
+
+## 6. Encryption by Data Source
+
+### 6.1 Batch Sources (IDP, ServiceNow, SailPoint, MECH, ERE, PEGA)
+
+**Data Flow:**
+
+```
+On-Premises Source System
+    ↓ (1. File Generation)
+FileX/SFTP Transfer Service
+    ↓ (2. PGP Encryption with public key)
+S3 Landing/RAW
+    ↓ (3. File arrives as .gpg encrypted)
+Lambda Function Triggered
+    ↓ (4. Decrypt PGP with private key from Secrets Manager)
+    ↓ (5. Re-encrypt with KMS CMK)
+S3 Landing/CURRENT
+    ↓ (6. Glue ETL transformation)
+S3 Standard Zone (Dual KMS)
+```
+
+**Encryption States:**
+
+- **On-Premises → Landing/RAW**: PGP encrypted
+- **Landing/CURRENT**: KMS encrypted (single layer)
+- **Standard Zone**: Dual KMS encrypted
+
+-----
+
+### 6.2 Streaming Sources (TSYS Real-time, Kafka)
+
+**Data Flow:**
+
+```
+Kafka Stream / Real-time Source
+    ↓ (1. Streaming data in motion)
+Kinesis Data Streams
+    ↓ (2. TLS encryption in transit)
+Kinesis Firehose / EDF Lambda
+    ↓ (3. Apply KMS encryption)
+S3 Landing/RAW
+    ↓ (4. Already KMS encrypted, no PGP)
+S3 Landing/CURRENT
+    ↓ (5. Glue streaming job transformation)
+S3 Standard Zone (Dual KMS)
+```
+
+**Encryption States:**
+
+- **In Transit**: TLS 1.3 encryption
+- **Landing/RAW**: KMS encrypted (no PGP needed)
+- **Landing/CURRENT**: KMS encrypted
+- **Standard Zone**: Dual KMS encrypted
+
+**Note**: Streaming data does NOT use PGP encryption as it’s already in AWS ecosystem via Kinesis
+
+-----
+
+## 7. AWS Glue & Lambda Encryption Logic
+
+### 7.1 Infrastructure Deployment
+
+**Deployment Method**: AWS CDK (Cloud Development Kit)
+
+**Components Deployed:**
+
+```
+Infrastructure Components:
+├── S3 Buckets (Landing, Standard)
+│   └── Encryption: KMS CMK enabled
+├── KMS Customer Managed Keys
+│   ├── Bucket-level CMK
+│   └── Application-level CMK
+├── IAM Roles
+│   ├── Glue execution role
+│   ├── Lambda execution role
+│   └── Athena query role
+├── Bucket Policies
+│   └── Access control definitions
+└── Secrets Manager Secrets
+    └── PGP private keys
+```
+
+-----
+
+### 7.2 Lambda Function - PGP Decryption
+
+**Function Name**: `dmine-pgp-decryption-handler`
+
+**Trigger**: S3 Event Notification on RAW folder file arrival
+
+**Process:**
+
+```python
+# Pseudo-code for Lambda PGP decryption
+def lambda_handler(event, context):
+    # Get file from S3 RAW
+    bucket = event['Records'][0]['s3']['bucket']['name']
+    key = event['Records'][0]['s3']['object']['key']
+    
+    # Retrieve PGP private key from Secrets Manager
+    private_key = get_secret('filex-pgp-private-key')
+    
+    # Download encrypted file
+    encrypted_file = s3.get_object(Bucket=bucket, Key=key)
+    
+    # Decrypt using PGP
+    decrypted_data = pgp_decrypt(encrypted_file, private_key)
+    
+    # Re-encrypt with KMS (automatic via S3 bucket encryption)
+    target_key = key.replace('/raw/', '/current/').replace('.gpg', '')
+    
+    # Upload to CURRENT folder
+    s3.put_object(
+        Bucket=bucket,
+        Key=target_key,
+        Body=decrypted_data,
+        ServerSideEncryption='aws:kms',
+        SSEKMSKeyId='arn:aws:kms:...:key/bucket-cmk'
+    )
+    
+    # Log processing
+    log_processing_metadata(key, target_key, 'SUCCESS')
+```
+
+-----
+
+### 7.3 Lambda Function - Dual KMS Encryption
+
+**Function Name**: `dmine-dual-kms-encryption-handler`
+
+**Purpose**: Apply application-level encryption before writing to Standard zone
+
+**Process:**
+
+```python
+# Pseudo-code for dual KMS encryption
+def lambda_handler(event, context):
+    # Read from Landing/CURRENT
+    data = glue_context.read_parquet(landing_current_path)
+    
+    # Identify sensitive fields
+    sensitive_fields = ['customer_id', 'ssn', 'fraud_score', 'account_number']
+    
+    # Encrypt sensitive fields with application KMS key
+    for field in sensitive_fields:
+        if field in data.columns:
+            data[field] = kms_encrypt(
+                data[field],
+                key_id='arn:aws:kms:...:key/app-cmk'
+            )
+    
+    # Write to Standard zone
+    # S3 bucket encryption (first layer) applied automatically
+    data.write.parquet(
+        standard_zone_path,
+        mode='overwrite',
+        partitionBy=['year', 'month', 'day']
+    )
+```
+
+-----
+
+### 7.4 Glue ETL Scripts - Encryption Handling
+
+**Glue Job**: `transform-landing-to-standard`
+
+**Encryption Logic:**
+
+```python
+# Glue script determines when to apply application-level encryption
+def apply_encryption_logic(data, dataset_name):
+    # Business rules determine encryption requirements
+    if dataset_name in ['customer_profiles', 'fraud_cases', 'pii_data']:
+        # Apply dual KMS
+        return encrypt_with_dual_kms(data)
+    else:
+        # Standard KMS only (bucket-level)
+        return data
+```
+
+**Access Control:**
+
+```
+Glue IAM Role requires:
+- kms:Decrypt for bucket CMK (read from Landing)
+- kms:Encrypt for bucket CMK (write to Standard)
+- kms:Decrypt for app CMK (read sensitive data)
+- kms:Encrypt for app CMK (write sensitive data)
+```
+
+-----
+
+## 8. EDF (Event-Driven Framework) Integration
+
+### 8.1 Kafka to S3 with KMS Encryption
+
+**Architecture:**
+
+```
+On-Premises Kafka Topic
+    ↓
+AWS Kinesis Data Streams (bridge)
+    ↓
+EDF Lambda Function (consumer)
+    ↓
+Lambda processes event
+    ↓
+Lambda encrypts with KMS
+    ↓
+Writes to S3 Landing/RAW
+```
+
+**EDF Lambda Pattern:**
+
+- One Lambda handles multiple Kafka topics
+- Concurrent runners for parallel processing
+- Built-in retry and error handling
+- KMS encryption before S3 write
+
+**Encryption:**
+
+- No PGP for streaming data (already in AWS)
+- KMS encryption applied by Lambda before S3 write
+- Dual KMS when writing to Standard zone
+
+-----
+
+## 9. Logs and Metadata Encryption
+
+### 9.1 Control Files and Processing Logs
+
+**Requirement**: Logs must be encrypted to avoid sensitive data exposure
+
+**Implementation:**
+
+**Glue Job Logs:**
+
+```
+Location: CloudWatch Logs
+Encryption: CloudWatch log group encrypted with KMS
+Retention: 90 days
+```
+
+**Application Logs in S3:**
+
+```
+s3://bmo-dmine-landing-prod-ca-central/_control/processing_logs/
+└── glue_execution_logs_20240826.json.encrypted
+
+Encryption: Preferably PGP or KMS
+Purpose: Avoid exposing sensitive data in logs
+```
+
+**Metadata Files:**
+
+```
+s3://bmo-dmine-standard-prod-ca-central/_metadata/
+├── schema_definitions/
+├── transformation_rules/
+└── data_lineage/
+
+Encryption: Dual KMS (contains sensitive metadata)
+```
+
+-----
+
+## 10. File Naming Conventions with Encryption
+
+### 10.1 Landing/RAW (PGP Encrypted)
+
+**Batch Files:**
+
+```
+Format: {source}_{dataset}_{yyyymmdd}_{sequence}_raw.{format}.gpg
+
+Examples:
+idp_customer_profiles_20240826_001_raw.parquet.gpg
+tsys_card_transactions_20240826_001_raw.csv.gpg
+servicenow_incidents_20240826_001_raw.json.gpg
+```
+
+**Streaming Files:**
+
+```
+Format: {source}_{dataset}_{yyyymmdd}_{hhmmss}_raw.{format}.kms
+
+Examples:
+tsys_realtime_20240826_140530_raw.json (KMS encrypted, not PGP)
+kafka_transactions_20240826_140532_raw.json
+```
+
+-----
+
+### 10.2 Landing/CURRENT (KMS Encrypted)
+
+**Format:** `{source}_{dataset}_{yyyymmdd}_current.parquet`
+
+**Examples:**
+
+```
+idp_customer_profiles_20240826_current.parquet
+tsys_card_transactions_20240826_current.parquet
+servicenow_incidents_20240826_current.parquet
+sailpoint_users_20240826_current.parquet
+```
+
+**Note**: No .gpg extension - PGP decrypted, KMS encrypted
+
+-----
+
+### 10.3 Standard Zone (Dual KMS Encrypted)
+
+**Format:** `{domain}_{dataset}_{yyyymmdd}_standard.parquet`
+
+**Examples:**
+
+```
+fraud_transaction_alerts_20240826_standard.parquet
+case_management_investigations_20240826_standard.parquet
+customer_profiles_360_20240826_standard.parquet
+identity_sailpoint_users_20240826_standard.parquet
+```
+
+**Note**: Dual KMS encryption applied, transparent to filename
+
+-----
+
+## 11. Encryption Summary by Zone
+
+|**Zone**    |**Folder**     |**Encryption Method**|**Key Management**                 |**File Extension**|
+|------------|---------------|---------------------|-----------------------------------|------------------|
+|**Landing** |RAW (Batch)    |PGP                  |Public: AWS Secrets, Private: FileX|.gpg              |
+|**Landing** |RAW (Streaming)|KMS CMK              |AWS KMS                            |.kms or none      |
+|**Landing** |CURRENT        |KMS CMK (single)     |AWS KMS                            |.parquet          |
+|**Landing** |ARCHIVE        |KMS CMK + Gzip       |AWS KMS                            |.gz               |
+|**Standard**|All Folders    |Dual KMS             |AWS KMS (2 keys)                   |.parquet          |
+
+-----
+
+## 12. Key Action Items & Implementation Plan
+
+### 12.1 Immediate Actions
+
+- ✅ **Confirm PGP onboarding with FileX team**
+  - Coordinate public/private key pair generation
+  - Store public key in AWS Secrets Manager
+  - Provide public key to FileX for encryption setup
+- ✅ **Deploy AWS infrastructure via CDK**
+  - Create S3 buckets with encryption enabled
+  - Generate KMS Customer Managed Keys
+  - Configure IAM roles and policies
+  - Set up Secrets Manager for PGP keys
+- ✅ **Ensure dual KMS encryption for Standard bucket**
+  - Configure bucket-level KMS
+  - Develop Lambda for application-level KMS
+  - Test dual encryption/decryption flow
+- ✅ **Update architecture diagrams**
+  - Document multiple buckets (Landing, Standard, Archive)
+  - Show encryption layers (PGP → KMS → Dual KMS)
+  - Include data flow with encryption states
+- ✅ **Request EDF Lambda code for Kafka integration**
+  - Obtain EDF pattern implementation
+  - Customize for DMINE Kafka topics
+  - Test with sample data streams
+
+-----
+
+### 12.2 Testing & Validation
+
+**Encryption Testing:**
+
+1. Test PGP encryption/decryption with sample files
+1. Validate KMS encryption at rest
+1. Verify dual KMS encryption for sensitive data
+1. Test Lambda decryption functions
+1. Validate Glue access to encrypted data
+
+**Security Validation:**
+
+1. Verify IAM permissions for KMS keys
+1. Test key rotation procedures
+1. Validate Secrets Manager access controls
+1. Review CloudTrail logs for encryption events
+1. Conduct penetration testing on encrypted data access
+
+-----
+
+## 13. Security Best Practices
+
+### 13.1 Key Management
+
+- **Principle of Least Privilege**: IAM roles grant minimum required KMS permissions
+- **Key Rotation**: Annual automatic rotation enabled for all CMKs
+- **Key Backup**: KMS keys backed up in multi-region configuration
+- **Access Auditing**: CloudTrail logs all KMS key usage
+- **Separation of Duties**: Different keys for different security domains
+
+### 13.2 Encryption Governance
+
+- **Encryption Standards**: AES-256 for all data at rest
+- **TLS Standards**: TLS 1.3 minimum for data in transit
+- **PGP Standards**: RSA 4096-bit keys for on-premises transfer
+- **Key Length**: Minimum 256-bit symmetric, 4096-bit asymmetric
+- **Algorithm Approval**: Only FIPS 140-2 approved algorithms
+
+### 13.3 Monitoring & Compliance
+
+- **CloudTrail Logging**: All S3 and KMS operations logged
+- **CloudWatch Alerts**: Encryption failure notifications
+- **Compliance Validation**: Quarterly encryption audits
+- **Access Reviews**: Monthly review of KMS key policies
+- **Incident Response**: Documented procedures for key compromise
+
+-----
+
+## 14. Appendix
+
+### 14.1 Glossary
+
+- **PGP**: Pretty Good Privacy - Asymmetric encryption for file transfer
+- **KMS**: Key Management Service - AWS managed encryption service
+- **CMK**: Customer Managed Key - User-controlled encryption keys in KMS
+- **Dual KMS**: Two-layer KMS encryption (bucket + application level)
+- **TLS**: Transport Layer Security - Encryption for data in transit
+- **EDF**: Event-Driven Framework - Pattern for Kafka integration
+
+### 14.2 Reference Documents
+
+- AWS KMS Best Practices: https://docs.aws.amazon.com/kms/
+- S3 Encryption Documentation: https://docs.aws.amazon.com/s3/encryption/
+- BMO Data Classification Policy: [Internal Reference]
+- DMINE Phase 1 Architecture: [Project Documentation]
+
+### 14.3 Contact Information
+
+- **Security Team**: security@bmo.com
+- **Cloud Engineering**: cloud-eng@bmo.com
+- **FileX Team**: filex-support@bmo.com
+- **DMINE Project Lead**: [Project Manager Contact]
+
+-----
+
+**Document Control:**
+
+- Version: 1.0
+- Classification: Internal - BMO Confidential
+- Next Review: Quarterly
+- Owner: DMINE Project Team / Enterprise Architecture
