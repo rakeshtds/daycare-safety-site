@@ -1,0 +1,475 @@
+Perfect! Here’s a **simple, straightforward document** focused just on S3 bucket structure and data flow:
+
+-----
+
+# **DMINE S3 Bucket Architecture & Data Flow**
+
+**Version:** 1.0  
+**Date:** December 2024
+
+-----
+
+## **1. S3 Bucket Overview**
+
+The DMINE platform uses **4 S3 buckets** across two zones:
+
+### **Landing Zone (3 Buckets)**
+
+1. **Landing Bucket** - Initial data ingestion
+1. **Staging Bucket** - Daily files with history
+1. **Archive Bucket** - Disaster recovery and reruns
+
+### **Standard Zone (1 Bucket)**
+
+1. **Standard Bucket** - Curated analytics-ready data
+
+-----
+
+## **2. Landing Zone Buckets**
+
+### **2.1 Landing Bucket**
+
+**Bucket Name:** `s3://bmo-dmine-landing-prod-ca-central/`
+
+**Purpose:**
+
+- Transitory bucket for initial data ingestion
+- First landing point for all data coming from on-premises or external sources
+
+**Data Sources:**
+
+- On-premises Sybase IQ (via AWS DMS)
+- External feeds (fraud intelligence, regulatory lists)
+- File-based sources (SFTP, MFT)
+
+**Encryption:**
+
+- **PGP encrypted** for high-risk/sensitive data (credit cards, SIN, account numbers)
+- Athena **CANNOT** access this bucket (by design for security)
+
+**Retention:**
+
+- **24-48 hours only** (transitory storage)
+- Files automatically deleted after processing
+
+**Folder Structure:**
+
+```
+s3://bmo-dmine-landing-prod-ca-central/
+  ├── fraud/
+  │   ├── cards/transactions/
+  │   └── pos/transactions/
+  ├── aml/
+  │   └── alerts/
+  └── customer/
+      └── profiles/
+```
+
+-----
+
+### **2.2 Staging Bucket**
+
+**Bucket Name:** `s3://bmo-dmine-staging-prod-ca-central/`
+
+**Purpose:**
+
+- Store daily files with historical feed tracking
+- Maintain 90-day history of ingested files
+- Enable rerun capability in case of failures
+
+**How Data Gets Here:**
+
+1. Process detects file arrival in Landing bucket
+1. PGP decryption performed (if encrypted)
+1. Data re-encrypted with **AWS KMS (AES-256)**
+1. File moved to Staging bucket
+
+**Encryption:**
+
+- **AWS KMS encrypted** (not PGP)
+- Athena and other AWS applications **CAN** read data from this bucket
+
+**Retention:**
+
+- **90 days** of daily files
+- Provides history for troubleshooting and reprocessing
+
+**Folder Structure:**
+
+```
+s3://bmo-dmine-staging-prod-ca-central/
+  ├── fraud/
+  │   ├── cards/
+  │   │   └── transactions/
+  │   │       └── year=2024/month=12/day=03/
+  │   │           └── card_txn_20241203.parquet
+  │   └── pos/
+  ├── aml/
+  │   └── alerts/
+  └── customer/
+      └── profiles/
+```
+
+**Key Features:**
+
+- Daily files stored with date partitioning
+- Each day’s feed maintains its own copy
+- Enables reprocessing if transformation fails
+
+-----
+
+### **2.3 Archive Bucket**
+
+**Bucket Name:** `s3://bmo-dmine-archive-prod-ca-central/`
+
+**Purpose:**
+
+- **Disaster recovery** backup
+- **Long-term retention** for regulatory compliance (7 years)
+- **Rerun capability** if major failures occur
+
+**How Data Gets Here:**
+
+- **Automatic copy** from Staging bucket
+- Every file in Staging is replicated to Archive
+
+**Encryption:**
+
+- **AWS KMS encrypted** (AES-256)
+
+**Retention:**
+
+- **7 years** (regulatory requirement - FINTRAC/OSFI)
+- Stored in cheaper storage tiers (Glacier) for cost optimization
+
+**Use Cases:**
+
+1. **Disaster Recovery:** If Staging bucket corrupted, restore from Archive
+1. **Rerun Scenarios:** If need to reprocess old data, files available here
+1. **Regulatory Audits:** Historical data accessible for compliance reviews
+
+**Folder Structure:**
+
+```
+s3://bmo-dmine-archive-prod-ca-central/
+  ├── staging-backup/
+  │   └── 2024/12/03/
+  │       └── [copy of all staging files]
+  └── standard-backup/
+      └── [periodic snapshots]
+```
+
+-----
+
+## **3. Standard Zone Bucket**
+
+### **3.1 Standard Bucket**
+
+**Bucket Name:** `s3://bmo-dmine-standard-prod-ca-central/`
+
+**Purpose:**
+
+- **Analytics-ready curated data** (final DMINE tables)
+- **7-year retention** for regulatory compliance
+- Optimized for consumption by BI tools, ML models, and analysts
+
+**Data Format:**
+
+- **Apache Parquet** (columnar format, optimized for analytics)
+- Snappy compression for performance
+- Date-partitioned for fast queries
+
+**How Data Gets Here:**
+
+1. AWS Glue ETL jobs read from Staging bucket
+1. Apply existing transformations (same logic as legacy Sybase/SSIS)
+1. Copy and merge data into Standard bucket
+1. Write as Parquet files with partitioning
+
+**Encryption:**
+
+- **AWS KMS encrypted** (AES-256)
+
+**Retention:**
+
+- **7 years** of historical data
+- Meets FINTRAC/OSFI regulatory requirements
+
+**Folder Structure:**
+
+```
+s3://bmo-dmine-standard-prod-ca-central/
+  ├── fraud/
+  │   ├── transactions/
+  │   │   └── year=2024/month=12/day=03/
+  │   │       └── part-00000.snappy.parquet
+  │   ├── risk_scores/
+  │   └── investigations/
+  ├── aml/
+  │   ├── alerts/
+  │   ├── customer_risk/
+  │   └── transactions/
+  ├── customer/
+  │   ├── profiles/
+  │   └── relationships/
+  └── reference/
+      ├── products/
+      ├── merchants/
+      └── rules/
+```
+
+**Access:**
+
+- Athena (SQL queries)
+- QuickSight (dashboards and reports)
+- Redshift Spectrum (data warehouse queries)
+- SageMaker (ML model training)
+- Data analysts and business users
+
+-----
+
+## **4. Data Flow - End-to-End**
+
+### **4.1 Complete Data Pipeline**
+
+```
+On-Premises/External Sources
+         ↓
+    LANDING BUCKET
+    (PGP encrypted, transitory 24-48 hrs)
+         ↓
+    [Decryption Process]
+         ↓
+    STAGING BUCKET ←→ ARCHIVE BUCKET
+    (KMS encrypted, 90-day history)     (DR copy, 7-year retention)
+         ↓
+    [Transformation via Glue ETL]
+         ↓
+    STANDARD BUCKET
+    (Parquet format, 7-year retention)
+         ↓
+    Analytics Consumption
+    (Athena, QuickSight, ML models)
+```
+
+-----
+
+### **4.2 Step-by-Step Data Flow**
+
+**Step 1: Data Arrival**
+
+- Data from on-premises systems arrives at **Landing Bucket**
+- High-risk data arrives PGP encrypted
+- File arrival triggers automated processing
+
+**Step 2: Landing → Staging**
+
+- Automated process detects new file
+- If PGP encrypted: decrypt using private key
+- Re-encrypt with AWS KMS
+- Move to **Staging Bucket** with date partition
+- Store copy in **Archive Bucket** for DR
+
+**Step 3: Staging → Standard**
+
+- Glue ETL jobs read files from Staging
+- Apply transformations (same business logic as existing Sybase/SSIS)
+- Merge with existing data in Standard bucket:
+  - New records: Insert
+  - Changed records: Update
+  - Deleted records: Soft delete
+- Write output as Parquet files in **Standard Bucket**
+
+**Step 4: Data Consumption**
+
+- Business users query data via Athena
+- BI tools read from Standard bucket
+- ML models train on curated datasets
+
+-----
+
+## **5. Encryption Strategy**
+
+### **5.1 Landing Bucket - PGP Encryption**
+
+**Why PGP?**
+
+- Highest security for sensitive data in transit
+- Data encrypted on-premises before sending to AWS
+- Prevents Athena access (additional security layer)
+
+**What Data is PGP Encrypted:**
+
+- Credit card numbers
+- Social Insurance Numbers (SIN)
+- Bank account numbers
+- High-risk customer PII
+
+**Process:**
+
+1. On-premises system encrypts file with PGP public key
+1. Encrypted file uploaded to Landing bucket
+1. Lambda function decrypts using PGP private key (stored in AWS Secrets Manager)
+1. Decrypted data immediately re-encrypted with KMS
+1. Written to Staging bucket
+
+-----
+
+### **5.2 Staging & Standard Buckets - AWS KMS Encryption**
+
+**Why KMS?**
+
+- Native AWS encryption
+- Allows Athena and other AWS services to read data
+- Automatic encryption/decryption
+- Centralized key management
+
+**What Data is KMS Encrypted:**
+
+- All data in Staging bucket
+- All data in Standard bucket
+- All data in Archive bucket
+
+**AWS Services with Access:**
+
+- AWS Glue (ETL processing)
+- Amazon Athena (SQL queries)
+- Amazon EMR (big data processing)
+- Amazon Redshift Spectrum (data warehouse)
+- Amazon SageMaker (ML models)
+
+-----
+
+## **6. Transformation & DMS Suspension**
+
+### **6.1 Implementing Existing Transformations**
+
+**Current State:**
+
+- Existing Sybase IQ stored procedures and SSIS packages contain transformation logic
+- Business rules, aggregations, joins, calculations already defined
+
+**Migration Approach:**
+
+1. **Document existing transformations:** Map all Sybase/SSIS logic
+1. **Convert to Glue ETL:** Rewrite transformations in PySpark for AWS Glue
+1. **Parallel validation:** Run old and new transformations side-by-side
+1. **Compare outputs:** Ensure cloud results match legacy results
+1. **Cutover:** Switch to cloud pipeline after validation passes
+
+-----
+
+### **6.2 Copy and Merge Process**
+
+**How Data Moves from Staging to Standard:**
+
+**Daily Process:**
+
+1. Glue ETL job reads today’s files from Staging bucket
+1. Apply transformations (cleansing, enrichment, aggregation)
+1. **Merge with existing data in Standard bucket:**
+
+- **New records:** Insert into target table
+- **Changed records:** Update existing records (based on primary key)
+- **Deleted records:** Mark as deleted (soft delete, not physical delete)
+
+1. Write merged output to Standard bucket as Parquet
+1. Update Glue Data Catalog with new partition
+
+**Example Merge Logic:**
+
+- Staging has today’s transactions: 1,000 new records
+- Standard has historical transactions: 50 million records
+- Glue job merges new 1,000 into existing 50 million
+- Output: Standard bucket now has 50,001,000 records
+
+-----
+
+### **6.3 DMS Suspension Strategy**
+
+**What is DMS?**
+
+- AWS Database Migration Service
+- Continuously replicates data from Sybase IQ to Landing bucket
+- Captures changes (inserts, updates, deletes) in real-time
+
+**When to Suspend DMS:**
+
+- After end-to-end pipeline is fully established and validated
+- When cloud pipeline proven to deliver same results as legacy
+- After successful parallel run (6 weeks minimum)
+
+**Suspension Process:**
+
+**Phase 1: Parallel Run (Months 1-6)**
+
+- DMS replicates from Sybase to Landing bucket
+- Cloud pipeline processes data through to Standard bucket
+- Legacy Sybase reports still running (users unaffected)
+- Validate cloud data matches Sybase data (reconciliation checks)
+
+**Phase 2: Validation Complete (Month 6)**
+
+- 6 weeks of successful parallel operation
+- Data quality meets SLA (99%+ accuracy)
+- Business users validate curated datasets
+- Executive sign-off obtained
+
+**Phase 3: DMS Suspension (Month 7 onwards)**
+
+- **Table-by-table suspension** (not all at once):
+
+1. Suspend DMS for Table A
+1. Cloud becomes primary source for Table A
+1. Monitor for 30 days
+1. If successful, suspend DMS for Table B
+1. Repeat until all tables migrated
+
+**Why Suspend DMS:**
+
+- Reduce ongoing costs ($108/month per DMS instance)
+- Lower load on source Sybase IQ system
+- Simplify architecture (eliminate redundant layer)
+
+**Rollback Safety:**
+
+- Legacy Sybase kept as hot standby for 90 days
+- Can re-enable DMS within 24 hours if issues detected
+- Staging bucket retains 90-day history for emergency reprocessing
+
+-----
+
+## **7. Summary**
+
+### **Bucket Summary Table**
+
+|Bucket      |Purpose               |Encryption|Retention  |Athena Access |
+|------------|----------------------|----------|-----------|--------------|
+|**Landing** |Initial ingestion     |PGP       |24-48 hours|No            |
+|**Staging** |Daily files + history |KMS       |90 days    |Yes           |
+|**Archive** |DR + long-term backup |KMS       |7 years    |Emergency only|
+|**Standard**|Curated analytics data|KMS       |7 years    |Yes           |
+
+### **Key Points**
+
+✓ **Landing** is transitory - data doesn’t stay here long (24-48 hours)
+
+✓ **Staging** holds 90 days of daily files for rerun capability
+
+✓ **Archive** is automatic copy for disaster recovery and compliance
+
+✓ **Standard** is the final destination - analytics-ready Parquet data
+
+✓ **PGP encryption** in Landing prevents Athena access (security)
+
+✓ **KMS encryption** in Staging/Standard allows AWS services to read data
+
+✓ **DMS suspended** after cloud pipeline proven reliable (Month 7+)
+
+✓ **Existing transformations** migrated from Sybase/SSIS to Glue ETL
+
+✓ **7-year retention** in Standard bucket meets regulatory requirements
+
+-----
+
+**End of Document**
