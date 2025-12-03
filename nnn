@@ -1,4 +1,4 @@
-Perfect! Here’s a **simple, straightforward document** focused just on S3 bucket structure and data flow:
+ Perfect! Here’s a **simple, straightforward document** focused just on S3 bucket structure and data flow:
 
 -----
 
@@ -473,3 +473,871 @@ On-Premises/External Sources
 -----
 
 **End of Document**
+
+Perfect! I’ll create a comprehensive S3 bucket architecture document for you:
+
+-----
+
+# **DMINE AWS S3 Bucket Architecture & Data Flow**
+
+## **Document Overview**
+
+**Purpose:** Define the S3 bucket structure, data flow, encryption strategy, and operational procedures for the DMINE cloud data platform
+
+**Version:** 1.0  
+**Last Updated:** December 2024  
+**Classification:** Internal - BMO Confidential
+
+-----
+
+## **1. Executive Summary**
+
+The DMINE AWS data platform implements a multi-zone S3 architecture designed for secure data ingestion, transformation, and long-term retention. The architecture consists of two primary zones:
+
+- **Landing Zone:** Transitory data ingestion with PGP encryption for high-risk data
+- **Standard Zone:** Curated, analytics-ready datasets with 7-year retention in Parquet format
+
+This design ensures data security, regulatory compliance, disaster recovery capability, and optimized performance for analytical consumption.
+
+-----
+
+## **2. S3 Bucket Architecture Overview**
+
+### **2.1 Landing Zone - Three-Bucket Design**
+
+**Bucket 1: Landing Bucket (Transitory)**
+
+```
+Bucket Name: s3://bmo-dmine-landing-prod-ca-central/
+Purpose: Initial data ingestion point
+Retention: 24-48 hours (transitory)
+Encryption: PGP encrypted (for high-risk/sensitive data)
+Access: Restricted - ingestion processes only
+```
+
+**Bucket 2: Staging Bucket (Daily Files & History)**
+
+```
+Bucket Name: s3://bmo-dmine-staging-prod-ca-central/
+Purpose: Daily file storage with historical feed tracking
+Retention: 90 days (configurable by data source)
+Encryption: AWS KMS (AES-256) after PGP decryption
+Access: AWS services (Glue, Athena, EMR) - read-enabled
+```
+
+**Bucket 3: Archive Bucket (Disaster Recovery & Rerun)**
+
+```
+Bucket Name: s3://bmo-dmine-archive-prod-ca-central/
+Purpose: Long-term backup and rerun capability
+Retention: 7 years (regulatory compliance)
+Encryption: AWS KMS (AES-256)
+Storage Class: S3 Glacier / Glacier Deep Archive (cost optimization)
+Access: Restricted - emergency recovery only
+```
+
+### **2.2 Standard Zone - Single Bucket Design**
+
+**Bucket: Standard Bucket (Curated Data)**
+
+```
+Bucket Name: s3://bmo-dmine-standard-prod-ca-central/
+Purpose: Analytics-ready, curated DMINE tables
+Retention: 7 years (regulatory requirement - FINTRAC/OSFI)
+Format: Apache Parquet (optimized for analytics)
+Encryption: AWS KMS (AES-256)
+Partitioning: By date, domain, and table for query performance
+Access: Athena, QuickSight, Redshift Spectrum, SageMaker
+```
+
+-----
+
+## **3. Data Flow & Processing Pipeline**
+
+### **3.1 End-to-End Data Flow**
+
+```
+On-Premises Sources → Landing Bucket → Staging Bucket → Standard Bucket
+                           ↓                ↓
+                    Archive Bucket    Archive Bucket
+```
+
+### **3.2 Stage 1: Landing Bucket (Initial Ingestion)**
+
+**Data Sources:**
+
+- On-premises Sybase IQ (via AWS DMS - Database Migration Service)
+- External feeds (fraud intelligence, regulatory lists)
+- File-based sources (SFTP, MFT)
+- Real-time streams (future: Kinesis)
+
+**Ingestion Process:**
+
+1. Data arrives at Landing bucket via:
+
+- AWS DMS for database sources
+- AWS Transfer Family (SFTP) for file-based sources
+- Direct S3 upload for batch files
+
+1. **PGP Encryption Applied:** High-risk/sensitive data encrypted at source before landing
+
+- Credit card data, SIN numbers, account details
+- Encryption keys managed via AWS Secrets Manager
+
+1. **Transitory Nature:** Files remain in Landing for 24-48 hours only
+1. **Athena Access Blocked:** PGP-encrypted files cannot be queried by Athena (by design for security)
+
+**Folder Structure Example:**
+
+```
+s3://bmo-dmine-landing-prod-ca-central/
+  ├── fraud/
+  │   ├── cards/
+  │   │   └── transactions/
+  │   │       └── 2024-12-03/
+  │   │           └── card_txn_20241203_123045.dat.pgp
+  │   └── pos/
+  ├── aml/
+  │   └── alerts/
+  └── customer/
+      └── profiles/
+```
+
+**Triggers:**
+
+- S3 Event Notification triggers AWS Lambda function upon file arrival
+- Lambda initiates processing workflow (Step Functions)
+
+-----
+
+### **3.3 Stage 2: Staging Bucket (Daily Files & History)**
+
+**Processing Flow:**
+
+**Step 1: PGP Decryption**
+
+- AWS Lambda function triggered by Landing bucket event
+- Retrieves PGP private key from AWS Secrets Manager
+- Decrypts file and validates integrity (checksum validation)
+
+**Step 2: AES-256 Encryption (AWS KMS)**
+
+- Decrypted data immediately re-encrypted using AWS KMS Customer Managed Key (CMK)
+- Server-side encryption (SSE-KMS) applied automatically
+- Encryption key specific to DMINE platform (separate from enterprise keys)
+
+**Step 3: File Storage & Historical Tracking**
+
+- Each daily file stored with timestamp and version tracking
+- Maintains 90-day rolling history of all ingested files
+- Enables reprocessing/rerun capability if needed
+
+**Step 4: Athena & AWS Service Access Enabled**
+
+- KMS-encrypted data readable by authorized AWS services
+- Glue Data Catalog automatically updated with schema metadata
+- Athena queries enabled for data validation and QA
+
+**Folder Structure Example:**
+
+```
+s3://bmo-dmine-staging-prod-ca-central/
+  ├── fraud/
+  │   ├── cards/
+  │   │   └── transactions/
+  │   │       ├── year=2024/
+  │   │       │   └── month=12/
+  │   │       │       └── day=03/
+  │   │       │           ├── card_txn_20241203_123045.parquet
+  │   │       │           └── card_txn_20241203_145030.parquet
+  │   │       └── _SUCCESS (completion marker)
+  │   └── history/
+  │       └── 2024-12-03/
+  │           └── manifest.json (file tracking metadata)
+  └── aml/
+```
+
+**Data Retention:**
+
+- **90-day retention policy:** Files older than 90 days automatically transitioned to Archive bucket
+- Lifecycle policy managed via S3 Lifecycle Configuration
+
+**Rerun Capability:**
+
+- If transformation fails, original staging files available for reprocessing
+- No need to re-ingest from source systems
+- Reduces load on on-premises systems
+
+-----
+
+### **3.4 Stage 3: Archive Bucket (Disaster Recovery)**
+
+**Purpose:**
+
+- Long-term backup for disaster recovery scenarios
+- Regulatory compliance (7-year retention requirement)
+- Emergency rerun capability if catastrophic failure
+
+**Copy Process:**
+
+- **Automated S3 Replication:** All files in Staging bucket automatically replicated to Archive
+- Replication triggers upon file creation in Staging
+- Near real-time replication (typically <15 minutes)
+
+**Storage Optimization:**
+
+- **S3 Intelligent-Tiering:** Automatically moves data between access tiers based on usage patterns
+  - Frequent Access (first 30 days): Standard S3
+  - Infrequent Access (30-90 days): S3 Standard-IA
+  - Archive Access (90+ days): S3 Glacier Instant Retrieval
+  - Deep Archive (1+ years): S3 Glacier Deep Archive
+
+**Cost Savings:**
+
+- Glacier Deep Archive: 95% cheaper than Standard S3 ($0.00099/GB/month vs. $0.023/GB/month)
+- 7-year retention becomes cost-effective for regulatory compliance
+
+**Recovery Scenarios:**
+
+1. **Data Corruption in Staging:** Restore from Archive bucket to Staging
+1. **Regional Failure:** Archive replicated to Canada West region (cross-region replication)
+1. **Accidental Deletion:** S3 Versioning enabled - previous versions recoverable
+
+**Folder Structure Example:**
+
+```
+s3://bmo-dmine-archive-prod-ca-central/
+  ├── staging-backup/
+  │   └── 2024/
+  │       └── 12/
+  │           └── 03/
+  │               └── [mirrored staging files]
+  └── standard-backup/
+      └── 2024/
+          └── Q4/
+              └── [periodic snapshots of curated data]
+```
+
+-----
+
+### **3.5 Stage 4: Standard Bucket (Curated Analytics Data)**
+
+**Purpose:**
+
+- **Analytics-ready datasets:** Final curated tables for consumption by BI tools, ML models, and analysts
+- **7-year historical retention:** Regulatory compliance (FINTRAC, OSFI requirements)
+- **Optimized format:** Apache Parquet for fast query performance
+
+**Data Transformation Process:**
+
+**Step 1: Implement Existing Transformations**
+
+- Migrate existing Sybase IQ/SSIS transformation logic to AWS Glue ETL jobs
+- Business rules, aggregations, joins, and calculations preserved
+- Transformation code version-controlled in Git repository
+
+**Step 2: Copy & Merge from Staging to Standard**
+
+- AWS Glue ETL jobs read from Staging bucket
+- Apply transformations (cleansing, enrichment, aggregation)
+- **Merge logic:**
+  - New records inserted
+  - Changed records updated (CDC - Change Data Capture via DMS)
+  - Deleted records soft-deleted (marked with deletion flag, not physically removed)
+- Write to Standard bucket in Parquet format with partitioning
+
+**Step 3: Data Quality Validation**
+
+- Automated quality checks run post-transformation
+- Record counts, null checks, business rule validation
+- Quality metrics logged to CloudWatch
+- Failed quality checks trigger SNS alerts to Data Engineering team
+
+**Step 4: Glue Data Catalog Update**
+
+- Table schemas registered in AWS Glue Data Catalog
+- Partitions automatically added (date-based partitioning)
+- Business metadata tagged (domain, sensitivity, owner)
+
+**Parquet Format Benefits:**
+
+- **Columnar storage:** 10x faster queries vs. row-based formats (CSV, JSON)
+- **Compression:** 70-80% storage reduction vs. uncompressed text files
+- **Schema evolution:** Add columns without breaking existing queries
+- **Predicate pushdown:** Athena/Redshift only read relevant columns/partitions
+
+**Folder Structure Example:**
+
+```
+s3://bmo-dmine-standard-prod-ca-central/
+  ├── fraud/
+  │   ├── transactions/
+  │   │   └── year=2024/
+  │   │       └── month=12/
+  │   │           └── day=03/
+  │   │               └── part-00000.snappy.parquet
+  │   ├── risk_scores/
+  │   │   └── year=2024/
+  │   │       └── month=12/
+  │   │           └── risk_score_daily.snappy.parquet
+  │   └── investigations/
+  ├── aml/
+  │   ├── alerts/
+  │   ├── customer_risk/
+  │   └── transactions/
+  ├── customer/
+  │   ├── profiles/
+  │   └── relationships/
+  └── reference/
+      ├── products/
+      ├── merchants/
+      └── geographies/
+```
+
+**Partitioning Strategy:**
+
+- **Date partitioning:** year=YYYY/month=MM/day=DD (reduces scan size for time-based queries)
+- **Domain partitioning:** Separate folders by business domain (fraud, aml, customer)
+- **Athena optimization:** Queries scan only relevant partitions (cost and performance optimization)
+
+**Data Retention & Archival:**
+
+- **Active data (0-2 years):** S3 Standard storage class (frequent access)
+- **Historical data (2-5 years):** S3 Standard-IA (monthly reporting, investigations)
+- **Compliance archive (5-7 years):** S3 Glacier Instant Retrieval (audit requests)
+- Lifecycle policies automate transitions based on data age
+
+-----
+
+### **3.6 DMS Suspension After Pipeline Establishment**
+
+**Migration Approach:**
+
+**Phase 1: Parallel Run (Months 1-6)**
+
+- AWS DMS continuously replicates data from Sybase IQ to Landing bucket
+- New Glue ETL pipelines run in parallel with legacy SSIS jobs
+- Data reconciliation validates cloud pipelines match legacy output
+
+**Phase 2: Validation & Cutover (Month 6)**
+
+- 6-week parallel run completed successfully
+- Cloud pipeline data quality meets SLA (≥99%)
+- Business users validate curated datasets in Standard bucket
+- Executive approval obtained for cutover
+
+**Phase 3: DMS Suspension (Month 7)**
+
+- **Table-by-table suspension:** Not all-at-once, gradual cutover
+
+1. Suspend DMS replication for validated table
+1. Cloud pipeline becomes primary data source
+1. Legacy Sybase table marked read-only (not deleted yet)
+1. Monitor for 30 days, then decommission legacy table
+
+**DMS Suspension Benefits:**
+
+- **Reduce DMS costs:** $0.15/hour per replication instance × 24/7 = $108/month per instance
+- **Lower source system load:** Eliminate continuous CDC queries on Sybase IQ
+- **Simplify architecture:** Remove redundant data movement layer
+
+**Fallback Plan:**
+
+- Legacy Sybase maintained as hot standby for 90 days post-DMS suspension
+- Can re-enable DMS replication within 24 hours if critical issues discovered
+- Staging bucket retains 90-day history for emergency reprocessing
+
+-----
+
+## **4. Encryption Strategy**
+
+### **4.1 Landing Bucket - PGP Encryption**
+
+**Use Case:** High-risk/sensitive data requiring end-to-end encryption
+
+**PGP Encryption Details:**
+
+- **Algorithm:** RSA 4096-bit keys + AES-256 symmetric encryption
+- **Key Management:** PGP private keys stored in AWS Secrets Manager
+- **Key Rotation:** Annual key rotation policy enforced
+- **Source-side encryption:** Data encrypted on-premises before transmission to AWS
+
+**Data Categories Requiring PGP:**
+
+- Credit card numbers (PAN - Primary Account Number)
+- Social Insurance Numbers (SIN)
+- Bank account numbers
+- Customer PII (Personally Identifiable Information)
+
+**Workflow:**
+
+1. On-premises system encrypts file using PGP public key
+1. Encrypted file (.pgp extension) uploaded to Landing bucket via SFTP/S3 upload
+1. Lambda function detects .pgp file, retrieves private key from Secrets Manager
+1. File decrypted in-memory (never stored unencrypted)
+1. Re-encrypted with KMS and written to Staging bucket
+
+**Security Benefits:**
+
+- **Data in transit:** Encrypted during transmission (TLS + PGP)
+- **Data at rest:** Encrypted in Landing bucket (PGP layer + S3 default encryption)
+- **Access control:** Athena cannot query PGP files (prevents unauthorized data exploration)
+
+-----
+
+### **4.2 Staging & Standard Buckets - AWS KMS Encryption**
+
+**Use Case:** AWS-native encryption for service integration and performance
+
+**KMS Encryption Details:**
+
+- **Server-Side Encryption (SSE-KMS):** Automatic encryption at rest
+- **Customer Managed Key (CMK):** DMINE-specific encryption key
+- **Key Alias:** `alias/dmine-data-platform-key`
+- **Key Policy:** Restricted to authorized IAM roles and services
+
+**AWS Services with KMS Access:**
+
+- AWS Glue (ETL jobs, crawlers, Data Catalog)
+- Amazon Athena (interactive queries)
+- Amazon EMR (Spark processing)
+- Amazon Redshift Spectrum (federated queries)
+- Amazon SageMaker (ML model training)
+
+**Encryption in Transit:**
+
+- **TLS 1.2+:** All data transfers encrypted (S3 to Glue, Glue to Athena, etc.)
+- **VPC Endpoints:** Private network connectivity within AWS (no internet exposure)
+
+**Audit & Compliance:**
+
+- **AWS CloudTrail:** Logs all KMS key usage (who accessed what, when)
+- **Key Rotation:** Automatic annual key rotation enabled
+- **Compliance:** Meets PIPEDA, OSFI, PCI-DSS encryption requirements
+
+-----
+
+## **5. Data Lifecycle & Retention Policies**
+
+### **5.1 Landing Bucket Lifecycle**
+
+|Age        |Action             |Reason                                  |
+|-----------|-------------------|----------------------------------------|
+|0-24 hours |Remain in Landing  |Processing window                       |
+|24-48 hours|Delete from Landing|Transitory bucket, data moved to Staging|
+
+**S3 Lifecycle Policy:**
+
+```json
+{
+  "Rules": [
+    {
+      "Id": "DeleteAfter48Hours",
+      "Status": "Enabled",
+      "ExpirationInDays": 2,
+      "NoncurrentVersionExpirationInDays": 1
+    }
+  ]
+}
+```
+
+-----
+
+### **5.2 Staging Bucket Lifecycle**
+
+|Age       |Action                |Storage Class |Monthly Cost/GB|
+|----------|----------------------|--------------|---------------|
+|0-30 days |Active                |S3 Standard   |$0.023         |
+|30-90 days|Archive               |S3 Standard-IA|$0.0125        |
+|90+ days  |Copy to Archive bucket|S3 Glacier    |$0.004         |
+|90+ days  |Delete from Staging   |Deleted       |-              |
+
+**Retention Purpose:**
+
+- **90-day window:** Allows reprocessing if transformation failures detected
+- **Historical tracking:** Maintains feed history for troubleshooting
+- **Cost optimization:** Balance between availability and storage cost
+
+-----
+
+### **5.3 Archive Bucket Lifecycle**
+
+|Age              |Action      |Storage Class          |Monthly Cost/GB|Retrieval Time|
+|-----------------|------------|-----------------------|---------------|--------------|
+|0-90 days        |Hot archive |S3 Glacier Instant     |$0.004         |Milliseconds  |
+|90 days - 2 years|Cold archive|S3 Glacier Flexible    |$0.0036        |3-5 hours     |
+|2-7 years        |Deep archive|S3 Glacier Deep Archive|$0.00099       |12 hours      |
+|7+ years         |Delete      |Compliance met         |-              |-             |
+
+**Regulatory Compliance:**
+
+- **FINTRAC:** 5-year retention for AML transaction data
+- **OSFI:** 7-year retention for regulatory reporting data
+- **BMO Policy:** 7-year retention (most conservative requirement applies)
+
+**Cost Example:**
+
+- 500 TB Standard S3 (7 years): $11.5M
+- 500 TB Glacier Deep Archive (7 years): $495K
+- **Savings: $11M over 7 years** (96% cost reduction)
+
+-----
+
+### **5.4 Standard Bucket Lifecycle**
+
+|Age      |Action              |Storage Class     |Purpose                             |
+|---------|--------------------|------------------|------------------------------------|
+|0-2 years|Active analytics    |S3 Standard       |Frequent queries (daily/weekly)     |
+|2-5 years|Historical analytics|S3 Standard-IA    |Monthly reporting, investigations   |
+|5-7 years|Compliance archive  |S3 Glacier Instant|Audit requests, regulatory inquiries|
+|7+ years |Delete              |Retention met     |Regulatory requirement satisfied    |
+
+**Parquet Compression:**
+
+- Snappy compression reduces storage by 70-80%
+- 500 TB raw data → ~100-150 TB compressed Parquet
+- Further reduces lifecycle storage costs
+
+-----
+
+## **6. Access Control & Security**
+
+### **6.1 IAM Policies by Bucket**
+
+**Landing Bucket:**
+
+- **Write:** AWS DMS service role, AWS Transfer Family, on-premises SFTP users
+- **Read:** Lambda decryption function only
+- **Delete:** Lifecycle policy automation only
+
+**Staging Bucket:**
+
+- **Write:** Lambda decryption function, Glue ETL jobs
+- **Read:** Glue crawlers, Athena, EMR, authorized data engineers
+- **Delete:** Lifecycle policy automation only
+
+**Standard Bucket:**
+
+- **Write:** Glue ETL jobs only (curated data pipeline)
+- **Read:** Athena, QuickSight, Redshift Spectrum, SageMaker, authorized analysts
+- **Delete:** Lifecycle policy automation only
+
+**Archive Bucket:**
+
+- **Write:** S3 replication from Staging/Standard buckets
+- **Read:** Break-glass emergency access (CISO approval required)
+- **Delete:** Lifecycle policy automation after 7 years
+
+-----
+
+### **6.2 Bucket Policies - Sample**
+
+**Landing Bucket - Restrict to Encryption in Transit:**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": "arn:aws:s3:::bmo-dmine-landing-prod-ca-central/*",
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    }
+  ]
+}
+```
+
+**Standard Bucket - Enforce KMS Encryption:**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyUnencryptedObjectUploads",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::bmo-dmine-standard-prod-ca-central/*",
+      "Condition": {
+        "StringNotEquals": {
+          "s3:x-amz-server-side-encryption": "aws:kms"
+        }
+      }
+    }
+  ]
+}
+```
+
+-----
+
+### **6.3 S3 Block Public Access**
+
+**All Buckets - Public Access Blocked:**
+
+- BlockPublicAcls: True
+- IgnorePublicAcls: True
+- BlockPublicPolicy: True
+- RestrictPublicBuckets: True
+
+**Rationale:** No DMINE data should ever be publicly accessible (financial crime data is highly sensitive)
+
+-----
+
+### **6.4 Logging & Monitoring**
+
+**S3 Server Access Logging:**
+
+- All object-level access logged to dedicated audit bucket
+- Logs retained for 7 years (compliance requirement)
+
+**AWS CloudTrail:**
+
+- All API calls logged (PutObject, GetObject, DeleteObject)
+- Who accessed what data, when, from where
+
+**CloudWatch Metrics:**
+
+- Bucket size, object count, request metrics
+- Alerts for unusual access patterns (e.g., mass downloads)
+
+**AWS Macie (Optional):**
+
+- Automated PII discovery and classification
+- Alerts if unencrypted sensitive data detected
+
+-----
+
+## **7. Disaster Recovery & Cross-Region Replication**
+
+### **7.1 Multi-Region Architecture**
+
+**Primary Region:** Canada Central (ca-central-1)
+**DR Region:** Canada West (future: ca-west-1, when available)
+
+**Replication Strategy:**
+
+- **S3 Cross-Region Replication (CRR):** Asynchronous replication to DR region
+- **Replication Scope:** Staging and Standard buckets replicated
+- **Landing Bucket:** Not replicated (transitory data, 48-hour retention)
+- **Archive Bucket:** Replicated with lifecycle policies applied in DR region
+
+**Replication Configuration:**
+
+```json
+{
+  "Role": "arn:aws:iam::ACCOUNT_ID:role/S3ReplicationRole",
+  "Rules": [
+    {
+      "Status": "Enabled",
+      "Priority": 1,
+      "Filter": {
+        "Prefix": ""
+      },
+      "Destination": {
+        "Bucket": "arn:aws:s3:::bmo-dmine-standard-dr-ca-west",
+        "ReplicationTime": {
+          "Status": "Enabled",
+          "Time": {
+            "Minutes": 15
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+**Recovery Point Objective (RPO):** <15 minutes (near real-time replication)
+
+**Recovery Time Objective (RTO):** <4 hours (spin up compute in DR region)
+
+-----
+
+### **7.2 Disaster Recovery Scenarios**
+
+**Scenario 1: Bucket Corruption/Accidental Deletion**
+
+- **S3 Versioning Enabled:** Recover previous version of object
+- **Recovery Time:** <15 minutes
+- **Process:** Restore object from version history via AWS CLI/Console
+
+**Scenario 2: Regional Outage (Canada Central)**
+
+- **DR Region Activation:** Switch to Canada West region
+- **Data Availability:** Immediate (replicated S3 buckets)
+- **Compute Restoration:** Deploy Glue jobs, EMR clusters in Canada West (2-4 hours)
+- **Process:** Update DNS/endpoints to point to DR region infrastructure
+
+**Scenario 3: Data Quality Issue Requiring Historical Rerun**
+
+- **Source:** Archive bucket (90-day history)
+- **Recovery Time:** <2 hours (reprocess from archived staging files)
+- **Process:** Copy archived files back to Staging, re-run Glue ETL jobs
+
+-----
+
+### **7.3 Backup Validation**
+
+**Monthly DR Drills:**
+
+- Restore sample dataset from DR region
+- Validate data integrity (checksums, record counts)
+- Measure actual RTO/RPO vs. targets
+- Document lessons learned, update runbooks
+
+-----
+
+## **8. Cost Optimization**
+
+### **8.1 Storage Cost Breakdown (Estimated Annual)**
+
+|Bucket               |Data Volume |Storage Class         |Monthly Cost|Annual Cost |
+|---------------------|------------|----------------------|------------|------------|
+|Landing (transitory) |10 TB       |S3 Standard           |$230        |$2,760      |
+|Staging (90-day)     |150 TB      |S3 Standard/IA        |$2,250      |$27,000     |
+|Archive (7-year)     |2,000 TB    |Glacier Deep          |$1,980      |$23,760     |
+|Standard (active)    |200 TB      |S3 Standard           |$4,600      |$55,200     |
+|Standard (historical)|300 TB      |S3 Standard-IA/Glacier|$1,500      |$18,000     |
+|**Total Storage**    |**2,660 TB**|**Mixed**             |**$10,560** |**$126,720**|
+
+**Data Transfer Costs:**
+
+- Inbound (on-prem to S3): Free
+- Outbound (S3 to Athena/Glue): Free (same region)
+- Cross-region replication: ~$20K/year (150 TB × $0.02/GB transfer)
+
+**Total Annual Storage + Transfer: ~$147K**
+
+-----
+
+### **8.2 Cost Optimization Strategies**
+
+**1. Intelligent-Tiering:**
+
+- Automatically moves data between access tiers
+- Saves 25-30% on storage costs
+- No retrieval fees (unlike Glacier)
+
+**2. S3 Lifecycle Policies:**
+
+- Automate transitions to cheaper storage classes
+- Delete expired data (no manual cleanup needed)
+
+**3. Parquet Compression:**
+
+- 70-80% storage reduction vs. CSV/JSON
+- Snappy compression (fast) for hot data
+- Gzip compression (higher ratio) for cold data
+
+**4. Partitioning Strategy:**
+
+- Athena queries scan only relevant partitions
+- 90% reduction in data scanned = 90% lower query costs
+- Example: Query 1 day of data instead of full table (365x cost reduction)
+
+**5. S3 Request Optimization:**
+
+- Batch small files into larger objects (reduce PUT requests)
+- Use S3 Select for filtering (reduce data transfer)
+
+**6. Reserved Capacity (Glue DPU):**
+
+- Purchase reserved Glue capacity for predictable workloads
+- 40% discount vs. on-demand pricing
+
+-----
+
+## **9. Operational Procedures**
+
+### **9.1 New Data Source Onboarding**
+
+**Step 1: Requirements Gathering (1-2 days)**
+
+- Data source owner submits intake form
+- Data volume, refresh frequency, sensitivity classification
+- Sample data files provided
+
+**Step 2: S3 Folder Structure Creation (1 day)**
+
+- Create folders in Landing, Staging, Standard buckets
+- Apply appropriate IAM policies and encryption settings
+- Configure S3 event notifications
+
+**Step 3: Ingestion Pipeline Setup (3-5 days)**
+
+- Configure AWS DMS (database sources) or AWS Transfer Family (SFTP)
+- Set up Lambda decryption function (if PGP required)
+- Test end-to-end ingestion to Staging bucket
+
+**Step 4: Glue ETL Development (5-10 days)**
+
+- Develop transformation logic (Glue PySpark jobs)
+- Implement data quality checks
+- Configure Glue crawlers for schema discovery
+
+**Step 5: Validation & Go-Live (3-5 days)**
+
+- Parallel run with source system validation
+- Business user acceptance testing
+- Production deployment and monitoring
+
+**Total Timeline: 2-3 weeks** (varies by complexity)
+
+-----
+
+### **9.2 Data Quality Monitoring**
+
+**Automated Checks (Post-Ingestion):**
+
+- **Completeness:** Record count validation against source manifest
+- **Freshness:** Data arrival time vs. expected schedule (<15 min tolerance)
+- **Schema drift:** Detect unexpected column changes
+- **Null value checks:** <1% for mandatory fields
+
+**Athena Queries for QA:**
+
+```sql
+-- Daily record count check
+SELECT 
+  COUNT(*) as record_count,
+  DATE(load_timestamp) as load_date
+FROM staging.fraud_transactions
+WHERE year = 2024 AND month = 12 AND day = 3
+GROUP BY DATE(load_timestamp);
+
+-- Null value percentage check
+SELECT 
+  COUNT(*) as total_records,
+  SUM(CASE WHEN card_number IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as null_pct
+FROM staging.fraud_transactions
+WHERE year = 2024 AND month = 12;
+```
+
+**Alerting:**
+
+- CloudWatch alarms trigger SNS notifications
+- PagerDuty for P1 critical issues (data not arriving)
+- Email alerts for P2/P3 (quality thresholds breached)
+
+-----
+
+### **9.3 Data Reprocessing (Rerun Procedure)**
+
+**Scenario:** Transformation job failed, need to reprocess yesterday’s data
+
+**Step 1: Identify Source Files**
+
+```bash
+# List files in Staging bucket for specific date
+aws s3 ls s3://bmo-dmine-staging-prod-ca-central/fraud/cards/transactions/year=2024/month=12/day=02/
+```
+
+**Step 2: Reset Target Table​​​​​​​​​​​​​​​​
