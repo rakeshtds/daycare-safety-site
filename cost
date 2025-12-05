@@ -1,3 +1,240 @@
+
+
+# **DEV & QA COST COMPARISON TABLE**
+
+-----
+
+## **DETAILED SERVICE-BY-SERVICE BREAKDOWN**
+
+|#                                 |Service Category                  |DEV (Monthly)|DEV (Annual)|QA (Monthly)|QA (Annual) |Combined Annual|% of DEV+QA|
+|----------------------------------|----------------------------------|-------------|------------|------------|------------|---------------|-----------|
+|                                  |                                  |             |            |            |            |               |           |
+|**1. DATA INGESTION**             |                                  |             |            |            |            |               |           |
+|1.1                               |AWS Lambda (EDF Streaming)        |$2,146       |$25,757     |$2,570      |$30,846     |$56,603        |27.2%      |
+|1.2                               |AWS SFTP (Batch Feeds)            |$257         |$3,084      |$270        |$3,240      |$6,324         |3.0%       |
+|1.3                               |AWS DMS (Migration Testing)       |$24          |$293        |$36         |$437        |$730           |0.4%       |
+|                                  |**INGESTION SUBTOTAL**            |**$2,427**   |**$29,134** |**$2,876**  |**$34,523** |**$63,657**    |**30.6%**  |
+|                                  |                                  |             |            |            |            |               |           |
+|**2. STORAGE (S3)**               |                                  |             |            |            |            |               |           |
+|2.1                               |S3 Landing Bucket                 |$10          |$120        |$10         |$120        |$240           |0.1%       |
+|2.2                               |S3 Staging Bucket (7-year)        |$1,436       |$17,232     |$1,436      |$17,232     |$34,464        |16.5%      |
+|2.3                               |S3 Standard Bucket (Parquet)      |$2,261       |$27,132     |$2,261      |$27,132     |$54,264        |26.0%      |
+|2.4                               |S3 Archive Bucket (Glacier)       |$393         |$4,716      |$393        |$4,716      |$9,432         |4.5%       |
+|2.5                               |S3 API Requests                   |$1           |$13         |$1          |$13         |$26            |0.0%       |
+|                                  |**STORAGE SUBTOTAL**              |**$4,101**   |**$49,213** |**$4,101**  |**$49,213** |**$98,426**    |**47.2%**  |
+|                                  |                                  |             |            |            |            |               |           |
+|**3. PROCESSING & TRANSFORMATION**|                                  |             |            |            |            |               |           |
+|3.1                               |AWS Glue ETL (Daily Jobs)         |$315         |$3,780      |$377        |$4,524      |$8,304         |4.0%       |
+|3.2                               |AWS Glue Crawler                  |$28          |$336        |$28         |$336        |$672           |0.3%       |
+|3.3                               |AWS Glue Data Catalog             |$5           |$60         |$5          |$60         |$120           |0.1%       |
+|3.4                               |AWS Step Functions                |$0.42        |$5          |$0.50       |$6          |$11            |0.0%       |
+|3.5                               |AWS EventBridge                   |$0           |$0          |$0          |$0          |$0             |0.0%       |
+|3.6                               |Glue Conversion (One-Time Year 1) |$1,081       |$12,976     |$1,081      |$12,976     |$25,952        |12.5%      |
+|                                  |**PROCESSING SUBTOTAL**           |**$1,430**   |**$17,157** |**$1,492**  |**$17,902** |**$35,059**    |**16.8%**  |
+|                                  |                                  |             |            |            |            |               |           |
+|**4. WORKFLOW ORCHESTRATION**     |                                  |             |            |            |            |               |           |
+|4.1                               |Amazon MWAA (Managed Airflow)     |$98          |$1,176      |$118        |$1,411      |$2,587         |1.2%       |
+|                                  |**ORCHESTRATION SUBTOTAL**        |**$98**      |**$1,176**  |**$118**    |**$1,411**  |**$2,587**     |**1.2%**   |
+|                                  |                                  |             |            |            |            |               |           |
+|**5. ANALYTICS & QUERY**          |                                  |             |            |            |            |               |           |
+|5.1                               |Amazon Athena                     |$50          |$600        |$60         |$720        |$1,320         |0.6%       |
+|5.2                               |AWS Lake Formation                |$0           |$0          |$0          |$0          |$0             |0.0%       |
+|                                  |**ANALYTICS SUBTOTAL**            |**$50**      |**$600**    |**$60**     |**$720**    |**$1,320**     |**0.6%**   |
+|                                  |                                  |             |            |            |            |               |           |
+|**6. MONITORING & LOGGING**       |                                  |             |            |            |            |               |           |
+|6.1                               |Amazon CloudWatch (Logs + Metrics)|$250         |$3,000      |$258        |$3,096      |$6,096         |2.9%       |
+|6.2                               |AWS CloudTrail                    |$8           |$96         |$8          |$96         |$192           |0.1%       |
+|6.3                               |Amazon SNS                        |$0           |$0          |$0          |$0          |$0             |0.0%       |
+|                                  |**MONITORING SUBTOTAL**           |**$258**     |**$3,096**  |**$266**    |**$3,192**  |**$6,288**     |**3.0%**   |
+|                                  |                                  |             |            |            |            |               |           |
+|**7. SECURITY & ENCRYPTION**      |                                  |             |            |            |            |               |           |
+|7.1                               |AWS KMS (API Requests)            |$6           |$72         |$6          |$72         |$144           |0.1%       |
+|7.2                               |AWS Secrets Manager               |$2           |$24         |$2          |$24         |$48            |0.0%       |
+|                                  |**SECURITY SUBTOTAL**             |**$8**       |**$96**     |**$8**      |**$96**     |**$192**       |**0.1%**   |
+|                                  |                                  |             |            |            |            |               |           |
+|**8. NETWORK & DATA TRANSFER**    |                                  |             |            |            |            |               |           |
+|8.1                               |VPC Endpoints (PrivateLink)       |$77          |$924        |$79         |$948        |$1,872         |0.9%       |
+|8.2                               |Cross-Region Transfer (DR)        |$0           |$0          |$0          |$0          |$0             |0.0%       |
+|                                  |**NETWORK SUBTOTAL**              |**$77**      |**$924**    |**$79**     |**$948**    |**$1,872**     |**0.9%**   |
+|                                  |                                  |             |            |            |            |               |           |
+|**9. DISASTER RECOVERY**          |                                  |             |            |            |            |               |           |
+|9.1                               |DR Storage (Cross-Region)         |$0           |$0          |$0          |$0          |$0             |0.0%       |
+|9.2                               |DR Data Transfer                  |$0           |$0          |$0          |$0          |$0             |0.0%       |
+|9.3                               |DR Testing/Drills                 |$0           |$0          |$0          |$0          |$0             |0.0%       |
+|                                  |**DR SUBTOTAL**                   |**$0**       |**$0**      |**$0**      |**$0**      |**$0**         |**0.0%**   |
+|                                  |                                  |             |            |            |            |               |           |
+|**10. AWS SUPPORT**               |                                  |             |            |            |            |               |           |
+|10.1                              |AWS Business Support              |$0           |$0          |$0          |$0          |$0             |0.0%       |
+|                                  |(Included in Production)          |             |            |            |            |               |           |
+|                                  |**SUPPORT SUBTOTAL**              |**$0**       |**$0**      |**$0**      |**$0**      |**$0**         |**0.0%**   |
+|                                  |                                  |             |            |            |            |               |           |
+|                                  |**TOTAL (YEAR 1)**                |**$8,533**   |**$102,396**|**$8,827**  |**$105,929**|**$208,325**   |**100%**   |
+
+-----
+
+## **SUMMARY BY MAJOR CATEGORY**
+
+|Category                                |DEV Annual  |QA Annual   |Combined    |% of Total|
+|----------------------------------------|------------|------------|------------|----------|
+|**Storage (S3)**                        |$49,213     |$49,213     |$98,426     |47.2%     |
+|**Ingestion (Lambda + SFTP + DMS)**     |$29,134     |$34,523     |$63,657     |30.6%     |
+|**Processing (Glue + Step Functions)**  |$17,157     |$17,902     |$35,059     |16.8%     |
+|**Monitoring (CloudWatch + CloudTrail)**|$3,096      |$3,192      |$6,288      |3.0%      |
+|**Orchestration (MWAA)**                |$1,176      |$1,411      |$2,587      |1.2%      |
+|**Network (VPC Endpoints)**             |$924        |$948        |$1,872      |0.9%      |
+|**Analytics (Athena)**                  |$600        |$720        |$1,320      |0.6%      |
+|**Security (KMS + Secrets)**            |$96         |$96         |$192        |0.1%      |
+|**DR**                                  |$0          |$0          |$0          |0.0%      |
+|                                        |            |            |            |          |
+|**GRAND TOTAL**                         |**$102,396**|**$105,929**|**$208,325**|**100%**  |
+
+-----
+
+## **DEV VS QA - KEY DIFFERENCES**
+
+|Metric                |DEV                    |QA                     |Difference  |
+|----------------------|-----------------------|-----------------------|------------|
+|**Uptime**            |10 hrs/day, 5 days/week|12 hrs/day, 5 days/week|QA +20%     |
+|**Monthly Hours**     |216.5 hours (29.8%)    |260 hours (35.7%)      |QA +43.5 hrs|
+|**Lambda Invocations**|2.146M/month           |2.57M/month            |QA +424K    |
+|**Lambda Cost**       |$25,757/year           |$30,846/year           |QA +$5,089  |
+|**Glue DPU-hours**    |715/month              |857/month              |QA +142     |
+|**DMS Usage**         |40 hrs/month           |60 hrs/month           |QA +20 hrs  |
+|**Storage**           |98.3TB                 |98.3TB                 |Same        |
+|**Total Annual**      |$102,396               |$105,929               |QA +$3,533  |
+
+-----
+
+## **YEAR 2+ COSTS (WITHOUT ONE-TIME GLUE CONVERSION)**
+
+|Category          |DEV (Year 2+)|QA (Year 2+)|Combined    |
+|------------------|-------------|------------|------------|
+|**Data Ingestion**|$29,134      |$34,523     |$63,657     |
+|**Storage**       |$49,213      |$49,213     |$98,426     |
+|**Processing**    |$4,181       |$4,926      |$9,107      |
+|**Other Services**|$6,892       |$4,291      |$11,183     |
+|                  |             |            |            |
+|**YEAR 2+ TOTAL** |**$89,420**  |**$92,953** |**$182,373**|
+
+**Savings Year 2+:** $25,952 (no Glue conversion)
+
+-----
+
+## **WITH LAMBDA OPTIMIZATION (200 BATCH SIZE)**
+
+|Category     |DEV (50 batch)|DEV (200 batch)|DEV Savings |QA (50 batch)|QA (200 batch)|QA Savings  |
+|-------------|--------------|---------------|------------|-------------|--------------|------------|
+|**Lambda**   |$25,757       |$6,439         |-$19,318    |$30,846      |$7,712        |-$23,134    |
+|**All Other**|$76,639       |$76,639        |$0          |$75,083      |$75,083       |$0          |
+|             |              |               |            |             |              |            |
+|**TOTAL**    |**$102,396**  |**$83,078**    |**-$19,318**|**$105,929** |**$82,795**   |**-$23,134**|
+
+**Combined DEV+QA Optimization Savings: $42,452/year (20.4%)**
+
+-----
+
+## **COST PER TB OF DATA**
+
+|Environment   |Total Cost|Data Volume|Cost per TB|
+|--------------|----------|-----------|-----------|
+|**Production**|$1,330,530|491.5TB    |$2,707/TB  |
+|**DEV**       |$102,396  |98.3TB     |$1,041/TB  |
+|**QA**        |$105,929  |98.3TB     |$1,078/TB  |
+
+**DEV/QA are 62% cheaper per TB** (no DR, reduced uptime)
+
+-----
+
+## **ALLOCATION OF $208K DEV+QA BUDGET**
+
+```
+Storage (S3 - 4 buckets):          $98,426  ████████████████████████ 47%
+Lambda (Real-time streaming):      $56,603  ██████████████ 27%
+Glue (Processing + Conversion):    $35,059  ████████ 17%
+Monitoring + Network:              $8,160   ██ 4%
+SFTP (Batch ingestion):            $6,324   █ 3%
+Orchestration (MWAA):              $2,587   █ 1%
+Analytics (Athena):                $1,320   █ 1%
+DMS + Security:                    $922     █ <1%
+                                   ------
+                                   $208,325  100%
+```
+
+-----
+
+## **MONTHLY COST BREAKDOWN**
+
+|Month    |DEV         |QA          |Combined    |Notes               |
+|---------|------------|------------|------------|--------------------|
+|**Jan**  |$8,533      |$8,827      |$17,360     |Full services active|
+|**Feb**  |$8,533      |$8,827      |$17,360     |                    |
+|**Mar**  |$8,533      |$8,827      |$17,360     |                    |
+|**Apr**  |$8,533      |$8,827      |$17,360     |                    |
+|**May**  |$8,533      |$8,827      |$17,360     |                    |
+|**Jun**  |$8,533      |$8,827      |$17,360     |                    |
+|**Jul**  |$8,533      |$8,827      |$17,360     |                    |
+|**Aug**  |$8,533      |$8,827      |$17,360     |                    |
+|**Sep**  |$8,533      |$8,827      |$17,360     |                    |
+|**Oct**  |$8,533      |$8,827      |$17,360     |                    |
+|**Nov**  |$8,533      |$8,827      |$17,360     |                    |
+|**Dec**  |$8,533      |$8,827      |$17,360     |                    |
+|         |            |            |            |                    |
+|**TOTAL**|**$102,396**|**$105,929**|**$208,325**|                    |
+
+-----
+
+## **COMPARISON: DEV/QA VS PRODUCTION**
+
+|Metric                |Production  |DEV         |QA          |DEV+QA        |
+|----------------------|------------|------------|------------|--------------|
+|**Data Volume**       |491.5TB     |98.3TB (20%)|98.3TB (20%)|196.6TB       |
+|**Uptime**            |24/7        |10h/5d      |12h/5d      |Business hours|
+|**Lambda Invocations**|36M/month   |2.1M/month  |2.6M/month  |4.7M/month    |
+|**Glue DPU-hours**    |12,000/month|715/month   |857/month   |1,572/month   |
+|**DR Required**       |Yes         |No          |No          |No            |
+|**Annual Cost**       |$1,330,530  |$102,396    |$105,929    |$208,325      |
+|**% of Prod Cost**    |100%        |7.7%        |8.0%        |15.7%         |
+
+-----
+
+## **KEY TAKEAWAYS**
+
+1. **Storage dominates DEV/QA costs at 47%**
+
+- 98.3TB across 4 S3 buckets per environment
+- Archive bucket adds 7-year compliance capability
+
+1. **Lambda is 2nd largest at 27%**
+
+- Real-time streaming processing
+- 75% savings available with batch optimization
+
+1. **One-time Glue conversion adds $26K Year 1**
+
+- Drops to $0 in Year 2+
+- Essential for Parquet format conversion
+
+1. **No DR saves $470K/year**
+
+- DEV/QA don’t need cross-region replication
+- Can restore from production if needed
+
+1. **Business hours operation saves 58-64%**
+
+- Compute resources (Lambda, SFTP, MWAA) auto-scale down
+- Storage costs remain constant (data at rest)
+
+1. **DEV/QA combined = 15.7% of production**
+
+- Industry benchmark: 10-20%
+- Reasonable investment for quality assurance
+
+-----
+
+**This table provides complete visibility into every service cost for DEV and QA environments!**
+
+
+
 # **AWS DMS Cost - Detailed Recalculation for 30TB Transfer**
 
 -----
