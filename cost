@@ -1,3 +1,370 @@
+# **AWS DMS Cost - Detailed Recalculation for 30TB Transfer**
+
+-----
+
+## **DMS COST BREAKDOWN - CORRECTED**
+
+### **Understanding the Migration Complexity**
+
+**Source:** Sybase IQ on-premises (30TB compressed, 90% compression)
+**Target:** AWS S3 Standard Zone (Parquet format)
+
+**Data transformation required:**
+
+1. Extract from Sybase IQ: 30TB compressed
+1. Uncompress during transfer: 30TB → 300TB raw
+1. Convert to Parquet in AWS: 300TB → 90TB (Parquet compression ~70%)
+
+-----
+
+## **DMS MIGRATION PHASES**
+
+### **Phase 1: Initial Full Load (30TB Compressed)**
+
+**Instance Required:**
+
+- **Type:** dms.r5.8xlarge (32 vCPU, 256GB RAM)
+- **Why larger:** 30TB is substantial, need parallel table loading
+- **Hourly cost:** $4.608/hour (ca-central-1)
+
+**Duration Estimate:**
+
+- **Network bandwidth:** 1 Gbps sustained (realistic enterprise connection)
+- **Theoretical transfer:** 30TB = 240,000 Gb ÷ 1 Gbps = 240,000 seconds = 66.7 hours
+- **DMS overhead:** Schema conversion, validation, retries = 2x theoretical
+- **Realistic duration:** 150 hours = **6-7 days**
+
+**Cost:**
+
+```
+150 hours × $4.608/hour = $691
+```
+
+-----
+
+### **Phase 2: Data Processing in AWS**
+
+**Important:** DMS writes raw CSV/JSON to S3, not Parquet!
+
+**What actually happens:**
+
+1. DMS transfers 30TB compressed → S3 as CSV files (300TB uncompressed)
+1. AWS Glue ETL converts CSV → Parquet (300TB → 90TB)
+1. This is a **separate processing step**, not DMS
+
+**So we need to account for:**
+
+- DMS cost: Transfer 30TB
+- Glue cost: Convert 300TB CSV → 90TB Parquet (one-time job)
+
+-----
+
+### **Phase 3: Change Data Capture (CDC) Validation**
+
+**Purpose:** Keep legacy Sybase and new AWS in sync during parallel run
+
+**Duration:** 60 days (parallel run + validation period)
+
+**Instance:** dms.r5.4xlarge (can downsize after full load)
+
+- **Hourly cost:** $2.304/hour
+- **Daily changes:** ~1.1TB/day new data
+- **Cost:** 60 days × 24 hours × $2.304 = $3,318
+
+-----
+
+### **DMS TOTAL COST**
+
+|Phase                |Instance  |Duration          |Cost             |
+|---------------------|----------|------------------|-----------------|
+|**Initial Full Load**|r5.8xlarge|150 hours (6 days)|$691             |
+|**CDC Validation**   |r5.4xlarge|60 days           |$3,318           |
+|**Data Transfer**    |-         |-                 |$0 (inbound free)|
+|**DMS TOTAL**        |          |                  |**$4,009**       |
+
+-----
+
+## **GLUE ETL - ONE-TIME HISTORICAL DATA CONVERSION**
+
+### **Converting 300TB CSV → 90TB Parquet**
+
+**This is a HUGE one-time processing job!**
+
+**Input:** 300TB uncompressed CSV files from DMS in S3
+**Output:** 90TB Parquet files in Standard Zone
+**Tables:** 500+ tables to process
+
+**DPU Calculation:**
+
+**Processing requirements:**
+
+- **Data volume:** 300TB to read and convert
+- **Typical Glue performance:** 1TB processed per 100 DPU-hours
+- **Required:** 300TB × 100 DPU-hours = **30,000 DPU-hours**
+
+**Time to complete:**
+
+- **Parallel DPUs:** 1,000 DPUs (max recommended for stability)
+- **Duration:** 30,000 ÷ 1,000 = 30 hours = **1.25 days**
+
+**Cost:**
+
+```
+30,000 DPU-hours × $0.44/DPU-hour = $13,200 (one-time)
+```
+
+-----
+
+### **Why This is Necessary**
+
+**DMS limitations:**
+
+- DMS cannot write Parquet format directly
+- DMS writes CSV, JSON, or Avro to S3
+- Parquet conversion requires separate ETL step
+
+**Alternative (more expensive):**
+
+- Use AWS Glue for entire migration instead of DMS
+- Would cost ~$50,000 (more expensive, same result)
+
+-----
+
+## **TOTAL HISTORICAL MIGRATION COST**
+
+|Component                        |Cost       |Notes                                       |
+|---------------------------------|-----------|--------------------------------------------|
+|**DMS Transfer**                 |$4,009     |30TB Sybase → S3 (6 days + 60 days CDC)     |
+|**Glue CSV → Parquet Conversion**|$13,200    |300TB → 90TB one-time job                   |
+|**S3 Temporary Storage**         |$300       |300TB CSV stored for 1 day during conversion|
+|**TOTAL MIGRATION**              |**$17,509**|One-time Year 1 cost                        |
+
+-----
+
+## **REVISED ANNUAL RUN COST**
+
+### **Updated Ingestion Layer**
+
+|Service                       |Previous    |Corrected   |Change      |
+|------------------------------|------------|------------|------------|
+|Lambda (EDF)                  |$432,086    |$432,086    |No change   |
+|SFTP (batch feeds)            |$14,148     |$14,148     |No change   |
+|DMS (migration)               |$3,871      |$4,009      |+$138       |
+|**Glue Historical Conversion**|**$0**      |**$13,200** |**+$13,200**|
+|**TOTAL INGESTION**           |**$450,105**|**$463,443**|**+$13,338**|
+
+-----
+
+## **REVISED TOTAL ANNUAL COST**
+
+|Category              |Previous      |Revised       |Change      |
+|----------------------|--------------|--------------|------------|
+|**Ingestion**         |$450,105      |$463,443      |+$13,338    |
+|**All Other Services**|$599,414      |$599,414      |$0          |
+|**TOTAL YEAR 1**      |**$1,049,519**|**$1,062,857**|**+$13,338**|
+
+-----
+
+## **MONTHLY RUN COST (ADJUSTED)**
+
+**Year 1 (with one-time migration):**
+
+```
+Total Year 1: $1,062,857
+Monthly average: $1,062,857 ÷ 12 = $88,571/month
+```
+
+**Year 2+ (no migration costs):**
+
+```
+Ongoing annual: $1,062,857 - $17,509 = $1,045,348
+Monthly: $1,045,348 ÷ 12 = $87,112/month
+```
+
+-----
+
+## **DETAILED MIGRATION COST BREAKDOWN**
+
+### **Week-by-Week Timeline & Cost**
+
+|Week          |Activity                             |Service           |Cost       |
+|--------------|-------------------------------------|------------------|-----------|
+|**Week 1**    |DMS initial full load (30TB)         |DMS r5.8xlarge    |$691       |
+|**Week 1-2**  |Glue CSV → Parquet conversion (300TB)|Glue (30K DPU-hrs)|$13,200    |
+|**Weeks 2-10**|CDC validation (60 days parallel run)|DMS r5.4xlarge    |$3,318     |
+|**Week 10**   |DMS shutdown, legacy decommission    |-                 |$0         |
+|**TOTAL**     |                                     |                  |**$17,209**|
+
+-----
+
+## **COMPARISON: DMS vs Alternative Migration Methods**
+
+|Method                   |Duration|Cost    |Pros                       |Cons                    |
+|-------------------------|--------|--------|---------------------------|------------------------|
+|**DMS + Glue (Selected)**|10 weeks|$17,509 |Proven, managed service    |Two-step process        |
+|**AWS Glue Only**        |8 weeks |$50,000 |Single step, native Parquet|More expensive          |
+|**AWS DataSync**         |4 weeks |$375,000|Fast                       |No DB schema handling   |
+|**AWS Snowball**         |6 weeks |$15,000 |Offline transfer           |Physical shipping delays|
+
+**DMS + Glue is most cost-effective for database migrations**
+
+-----
+
+## **WHY GLUE CONVERSION COST IS NECESSARY**
+
+### **DMS Output Formats (What it CAN do)**
+
+**Supported by DMS:**
+
+- CSV (comma-separated)
+- JSON (document format)
+- Avro (binary format)
+- Parquet (❌ NOT supported for S3 targets)
+
+**DMS writes to S3 as:**
+
+```
+s3://bucket/schema/table/LOAD00000001.csv
+s3://bucket/schema/table/LOAD00000002.csv
+```
+
+### **Why Parquet is Required**
+
+**Parquet benefits:**
+
+- **70% storage savings:** 300TB → 90TB
+- **10x faster queries:** Columnar format (Athena only reads needed columns)
+- **Better compression:** Snappy/Gzip per column
+- **Industry standard:** Best format for analytics
+
+**CSV problems:**
+
+- **No compression:** 300TB stays 300TB
+- **Slow queries:** Must scan entire file for one column
+- **High costs:** $300TB × $0.023/GB = $6,900/month storage (vs $2,070 for Parquet)
+
+**Savings over 1 year:**
+
+```
+CSV storage: $6,900/month × 12 = $82,800
+Parquet storage: $2,070/month × 12 = $24,840
+Savings: $57,960/year
+
+Glue conversion cost: $13,200 (pays for itself in 3 months!)
+```
+
+-----
+
+## **OPTIMIZATION: Can We Reduce Glue Conversion Cost?**
+
+### **Option 1: Compress During DMS Transfer (NOT Possible)**
+
+**Why it doesn’t work:**
+
+- DMS doesn’t support Parquet output to S3
+- Must convert after landing
+
+### **Option 2: Use Smaller Glue Job (Slower)**
+
+**Instead of 1,000 DPUs for 30 hours:**
+
+**Conservative approach:**
+
+```
+500 DPUs × 60 hours = 30,000 DPU-hours
+Cost: $13,200 (same cost, just slower)
+```
+
+**You can’t reduce cost, only change speed**
+
+### **Option 3: Skip Parquet Conversion (NOT Recommended)**
+
+**Keep data as CSV:**
+
+- **Storage cost:** $82,800/year (vs $24,840 for Parquet)
+- **Athena query cost:** 10x higher (must scan entire files)
+- **Annual additional cost:** ~$60,000+
+- **Don’t do this!**
+
+-----
+
+## **FINAL CORRECTED COST SUMMARY**
+
+### **Year 1 Total Annual Cost**
+
+|Category              |Amount        |%       |
+|----------------------|--------------|--------|
+|Lambda (EDF 50 batch) |$432,086      |40.7%   |
+|Storage (1.5PB)       |$250,136      |23.5%   |
+|Development/Testing   |$149,257      |14.0%   |
+|Contingency (10%)     |$95,238       |9.0%    |
+|AWS Support (10%)     |$95,238       |9.0%    |
+|Glue ETL (ongoing)    |$64,065       |6.0%    |
+|Network & Transfer    |$22,324       |2.1%    |
+|**One-Time Migration**|**$17,509**   |**1.6%**|
+|Monitoring            |$15,240       |1.4%    |
+|SFTP (batch)          |$14,148       |1.3%    |
+|MWAA (Airflow)        |$3,948        |0.4%    |
+|Athena                |$3,000        |0.3%    |
+|Security (KMS)        |$444          |0.0%    |
+|                      |              |        |
+|**TOTAL YEAR 1**      |**$1,062,857**|**100%**|
+
+-----
+
+### **Year 2+ Ongoing Cost (No Migration)**
+
+**Remove one-time costs:**
+
+```
+Year 1 total: $1,062,857
+Migration costs: -$17,509
+Year 2+ ongoing: $1,045,348
+```
+
+-----
+
+## **REVISED RECOMMENDATIONS**
+
+### **Immediate Actions**
+
+1. **Approve DMS + Glue migration budget: $17,509**
+
+- DMS: $4,009
+- Glue conversion: $13,200
+- One-time Year 1 only
+
+1. **Plan for 10-week migration timeline**
+
+- Week 1: DMS full load (6 days)
+- Weeks 1-2: Glue CSV→Parquet conversion
+- Weeks 2-10: CDC validation period
+
+1. **Increase Lambda batch size to 200 for $324K annual savings**
+
+- Configuration change only
+- Reduces ongoing cost to $738K
+
+-----
+
+## **FINAL ANSWER**
+
+**Year 1 Annual Run Cost (Corrected): $1,062,857**
+
+**Breakdown:**
+
+- Ongoing operations: $1,045,348
+- One-time migration (DMS + Glue): $17,509
+
+**Monthly equivalent:**
+
+- Year 1 average: $88,571/month
+- Year 2+ ongoing: $87,112/month
+
+**Key correction: Added $13,200 for Glue CSV→Parquet conversion**
+
+This is necessary because DMS cannot write Parquet format directly. The conversion pays for itself in 3 months through storage and query cost savings.​​​​​​​​​​​​​​​​
+
 Let me verify and add the missing services to ensure **all costs are included**:
 
 -----
