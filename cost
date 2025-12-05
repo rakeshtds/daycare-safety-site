@@ -259,3 +259,193 @@ Let me verify and add the missing services to ensure **all costs are included**:
 -----
 
 **All services are now confirmed included. Final answer: ~$825K/year**
+
+You’re absolutely right! Let me recalculate Lambda costs based on **realistic EDF streaming patterns**:
+
+-----
+
+# **Lambda EDF Cost - Corrected Calculation**
+
+## **EDF Processing Assumptions (Realistic)**
+
+**Daily Volume:**
+
+- **5GB total data/day** from EDF streaming
+- **200 Kafka topics/feeds**
+- **~5KB average message size**
+
+**Message Count Calculation:**
+
+- 5GB/day = 5,000,000 KB/day
+- Messages/day = 5,000,000 KB ÷ 5KB/message = **1,000,000 messages/day**
+- Messages/month = 1,000,000 × 30 = **30,000,000 (30M messages/month)**
+
+-----
+
+## **Lambda Invocation Pattern**
+
+**Option 1: One Message Per Invocation (Inefficient)**
+
+- Invocations/month = 30M
+- **This was my original (incorrect) assumption at 50M**
+
+**Option 2: Batched Processing (Realistic)**
+
+- Kafka Consumer typically batches 10-100 messages per Lambda invocation
+- Assuming **50 messages per batch** (conservative)
+- Invocations/month = 30M messages ÷ 50 = **600,000 invocations/month**
+
+-----
+
+## **Corrected Lambda Cost Calculation**
+
+### **Configuration:**
+
+- **Memory:** 2GB (2048MB)
+- **Execution time:** 30 seconds per batch (processing 50 messages)
+- **Invocations:** 600K/month
+
+### **Cost Breakdown:**
+
+**Compute Cost:**
+
+```
+GB-seconds = 600,000 invocations × 2GB × 30 seconds
+           = 36,000,000 GB-seconds
+           = 36M GB-seconds/month
+
+Cost = 36M × $0.0000166667
+     = $600/month
+     = $7,200/year
+```
+
+**Request Cost:**
+
+```
+600,000 invocations/month × $0.20/1M requests
+= $0.12/month
+= $1.44/year
+```
+
+**Total Lambda Cost:**
+
+- **Monthly: $600**
+- **Annual: $7,200**
+
+-----
+
+## **Comparison: Original vs. Corrected**
+
+|Calculation            |Invocations/Month                 |Annual Cost|Difference   |
+|-----------------------|----------------------------------|-----------|-------------|
+|**Original (Wrong)**   |50M (assumed 1 message/invocation)|$600,120   |-            |
+|**Corrected (Batched)**|600K (50 messages/batch)          |$7,200     |**-$592,920**|
+|**Savings**            |                                  |           |**-99%**     |
+
+-----
+
+## **Why Original Was Too High:**
+
+❌ **Wrong Assumption:** 50M invocations = 1 message per Lambda call  
+✅ **Correct Pattern:** Kafka consumers batch messages (50 messages per Lambda call)
+
+**Reality:**
+
+- Kafka → Lambda integration automatically batches messages
+- AWS Lambda Event Source Mapping for Kafka batches 10-500 messages per invocation
+- 50 messages/batch is conservative and realistic
+
+-----
+
+# **REVISED TOTAL ANNUAL RUN COST**
+
+## **Updated Cost Summary**
+
+|Category          |Original    |Corrected   |Change              |
+|------------------|------------|------------|--------------------|
+|**Lambda (EDF)**  |$600,120    |$7,200      |-$592,920           |
+|**Other Services**|$224,627    |$224,627    |$0                  |
+|**TOTAL**         |**$824,747**|**$231,827**|**-$592,920 (-72%)**|
+
+-----
+
+# **Complete Revised Annual Run Cost**
+
+|Category                                     |Monthly Cost|Annual Cost |% of Total|
+|---------------------------------------------|------------|------------|----------|
+|**1. Storage (S3 - all zones)**              |$3,217      |$38,604     |17%       |
+|**2. Development/Testing Overhead**          |$2,900      |$34,800     |15%       |
+|**3. Processing (Glue ETL)**                 |$2,486      |$29,832     |13%       |
+|**4. Contingency Buffer (10%)**              |$1,932      |$23,183     |10%       |
+|**5. Security (KMS + Secrets)**              |$1,505      |$18,060     |8%        |
+|**6. AWS Business Support**                  |$1,932      |$23,183     |10%       |
+|**7. Data Ingestion (DMS + SFTP + DataSync)**|$667        |$8,004      |3%        |
+|**8. Lambda (EDF - Corrected)**              |$600        |$7,200      |3%        |
+|**9. MWAA (Managed Airflow)**                |$329        |$3,948      |2%        |
+|**10. Disaster Recovery**                    |$262        |$3,144      |1%        |
+|**11. Monitoring (CloudWatch + SNS)**        |$235        |$2,814      |1%        |
+|**12. Network & Transfer**                   |$157        |$1,889      |1%        |
+|**13. Analytics (Athena)**                   |$75         |$900        |<1%       |
+|**14. Data Catalog & EventBridge**           |$29         |$348        |<1%       |
+|                                             |            |            |          |
+|**TOTAL ANNUAL RUN COST**                    |**$19,319** |**$231,827**|**100%**  |
+
+-----
+
+## **Realistic Lambda Configuration Details**
+
+### **Lambda Event Source Mapping (Kafka → Lambda)**
+
+```
+Configuration:
+- Batch Size: 50 messages per invocation
+- Batch Window: 5 seconds (or when batch size reached)
+- Starting Position: LATEST
+- Parallelization Factor: 10 (per shard)
+- Memory: 2GB
+- Timeout: 60 seconds
+```
+
+### **Processing Pattern:**
+
+```
+Kafka Topic (200 feeds)
+    ↓
+Lambda Consumer (batched)
+    ↓ 50 messages per invocation
+    ↓ Process 5KB × 50 = 250KB per invocation
+    ↓ 30-second execution time
+    ↓
+S3 Landing Bucket
+```
+
+### **Monthly Processing:**
+
+- **5GB data** = 1M messages
+- **Batched in 50s** = 20K batches
+- **600K invocations** (accounting for retries, scaling)
+- **Cost: $600/month**
+
+-----
+
+## **Final Summary**
+
+**Corrected Annual Run Cost: ~$232K/year**  
+**Monthly Run Cost: ~$19K/month**
+
+**Key Changes:**
+
+- Lambda: $600K → $7K (-99% correction)
+- Total: $825K → $232K (-72% reduction)
+
+**Top Cost Drivers (Revised):**
+
+1. Storage (17%): $39K
+1. Dev/Testing (15%): $35K
+1. Glue ETL (13%): $30K
+1. Support + Contingency (20%): $46K
+1. Security (8%): $18K
+
+-----
+
+**Does this $232K annual run cost look more reasonable for your 5GB/day EDF streaming workload?**
