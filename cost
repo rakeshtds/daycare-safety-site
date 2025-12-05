@@ -448,4 +448,466 @@ S3 Landing Bucket
 
 -----
 
-**Does this $232K annual run cost look more reasonable for your 5GB/day EDF streaming workload?**
+**
+# **AWS Annual Run Cost - Lambda with 50 Batch Size**
+
+-----
+
+## **LAMBDA COST CALCULATION (50 Batch Size)**
+
+### **EDF Near Real-Time Processing**
+
+**Daily Volume:**
+
+- **Data:** 300GB/day (1TB total, but 300GB via EDF)
+- **Records:** 60M records/day
+- **Record size:** 300GB ÷ 60M = 5KB per record
+
+**Monthly Processing:**
+
+- **Records:** 60M × 30 = 1,800,000,000 (1.8B records/month)
+- **Batch size:** 50 records per invocation
+- **Invocations:** 1.8B ÷ 50 = **36,000,000 (36M invocations/month)**
+
+-----
+
+### **Lambda Configuration**
+
+**Settings:**
+
+- **Memory:** 2GB (2048MB)
+- **Batch size:** 50 messages
+- **Execution time:** 30 seconds per batch
+- **Timeout:** 60 seconds
+
+-----
+
+### **Cost Breakdown**
+
+**Compute Cost:**
+
+```
+GB-seconds per month:
+36M invocations × 2GB × 30 seconds = 2,160,000,000 GB-seconds
+
+Compute cost:
+2,160,000,000 × $0.0000166667 = $36,000/month
+                               = $432,000/year
+```
+
+**Request Cost:**
+
+```
+36M invocations/month × $0.20 per 1M requests = $7.20/month
+                                                = $86.40/year
+```
+
+**Total Lambda Cost:**
+
+```
+Monthly: $36,007
+Annual: $432,086
+```
+
+-----
+
+## **COMPLETE ANNUAL RUN COST - DETAILED BREAKDOWN**
+
+-----
+
+### **1. DATA INGESTION LAYER**
+
+|Service             |Specification                   |Monthly Cost|Annual Cost |
+|--------------------|--------------------------------|------------|------------|
+|**AWS Lambda (EDF)**|2GB, 50 batch, 36M invocations  |$36,007     |$432,086    |
+|**AWS SFTP**        |800GB/day batch feeds           |$1,179      |$14,148     |
+|**AWS DMS**         |30TB one-time migration (Year 1)|$323        |$3,871      |
+|**SUBTOTAL**        |                                |**$37,509** |**$450,105**|
+
+**Details:**
+
+- Lambda processes 60M records/day in real-time from Kafka
+- SFTP handles IDP (300GB) + Direct Feed (500GB) batch loads
+- DMS migrates historical 30TB Sybase database (one-time)
+
+-----
+
+### **2. STORAGE LAYER (S3)**
+
+|Bucket          |Volume            |Storage Class         |Monthly Cost|Annual Cost |
+|----------------|------------------|----------------------|------------|------------|
+|**Landing**     |2.2TB             |S3 Standard           |$51         |$612        |
+|**Staging**     |500TB             |Standard + Standard-IA|$7,290      |$87,480     |
+|**Standard**    |500TB             |S3 Standard           |$11,500     |$138,000    |
+|**Archive (DR)**|500TB             |Glacier Instant       |$2,000      |$24,000     |
+|**S3 Requests** |PUT/GET operations|$4                    |$44         |            |
+|**SUBTOTAL**    |**1,502TB**       |                      |**$20,845** |**$250,136**|
+
+**Details:**
+
+- Landing: 48-hour transitory storage (2 days × 1.1TB)
+- Staging: 7-year retention with daily files (90TB historical + 410TB Year 1 growth)
+- Standard: Curated Parquet data for analytics (same 500TB)
+- Archive: Cross-region DR backup to Canada West
+- Total storage grows from 90TB → 500TB in Year 1
+
+-----
+
+### **3. PROCESSING & TRANSFORMATION LAYER**
+
+|Service              |Specification                               |Monthly Cost|Annual Cost|
+|---------------------|--------------------------------------------|------------|-----------|
+|**AWS Glue ETL**     |12,000 DPU-hours/month (1.1TB/day)          |$5,280      |$63,360    |
+|**AWS Glue Crawler** |90 DPU-hours/month (500 tables)             |$40         |$480       |
+|**Glue Data Catalog**|1.8M objects (700 tables, 7-year partitions)|$17         |$204       |
+|**EventBridge**      |450K events/month (file arrivals)           |$0          |$0         |
+|**Step Functions**   |75K transitions/month (workflow)            |$2          |$21        |
+|**SUBTOTAL**         |                                            |**$5,339**  |**$64,065**|
+
+**Details:**
+
+- Glue ETL processes 1.1TB daily across 500 active tables
+- Daily processing: 100 DPUs × 4 hours = 400 DPU-hours
+- Crawler discovers schemas and updates catalog daily
+- EventBridge orchestrates job triggers (under 1M free tier)
+- Step Functions manages complex multi-table workflows
+
+-----
+
+### **4. WORKFLOW ORCHESTRATION**
+
+|Service        |Specification               |Monthly Cost|Annual Cost|
+|---------------|----------------------------|------------|-----------|
+|**Amazon MWAA**|Small environment, 2 workers|$329        |$3,948     |
+|**SUBTOTAL**   |                            |**$329**    |**$3,948** |
+
+**Details:**
+
+- Managed Apache Airflow for complex DAG orchestration
+- Handles dependencies between 500 tables
+- Small environment sufficient for 1.1TB/day volume
+
+-----
+
+### **5. ANALYTICS & QUERY LAYER**
+
+|Service           |Specification                           |Monthly Cost|Annual Cost|
+|------------------|----------------------------------------|------------|-----------|
+|**Amazon Athena** |50TB scanned/month (partitioned queries)|$250        |$3,000     |
+|**Lake Formation**|Data governance (no additional charge)  |$0          |$0         |
+|**SUBTOTAL**      |                                        |**$250**    |**$3,000** |
+
+**Details:**
+
+- Athena queries on Parquet format with date partitioning
+- 50TB scanned despite 500TB stored (90% reduction via optimization)
+- Lake Formation provides centralized access control
+
+-----
+
+### **6. MONITORING & LOGGING**
+
+|Service                  |Specification                  |Monthly Cost|Annual Cost|
+|-------------------------|-------------------------------|------------|-----------|
+|**CloudWatch Logs**      |2TB ingestion + 6TB storage    |$1,180      |$14,160    |
+|**CloudWatch Dashboards**|10 dashboards                  |$30         |$360       |
+|**CloudWatch Alarms**    |200 alarms                     |$20         |$240       |
+|**AWS CloudTrail**       |40M data events/month          |$40         |$480       |
+|**Amazon SNS**           |Notifications (under free tier)|$0          |$0         |
+|**SUBTOTAL**             |                               |**$1,270**  |**$15,240**|
+
+**Details:**
+
+- CloudWatch captures logs from 36M Lambda invocations
+- 3-month log retention for troubleshooting
+- 200 alarms for proactive monitoring (job failures, latency spikes)
+- CloudTrail logs all API calls for compliance audits
+
+-----
+
+### **7. SECURITY & ENCRYPTION**
+
+|Service            |Specification                  |Monthly Cost|Annual Cost|
+|-------------------|-------------------------------|------------|-----------|
+|**AWS KMS**        |3 CMKs + 10M API requests/month|$33         |$396       |
+|**Secrets Manager**|10 secrets (credentials, keys) |$4          |$48        |
+|**SUBTOTAL**       |                               |**$37**     |**$444**   |
+
+**Details:**
+
+- 3 Customer Managed Keys (data lake, Glue, Lambda encryption)
+- S3 Bucket Keys enabled (reduces KMS requests by 99%)
+- Secrets Manager stores PGP keys, database credentials
+- Automatic key rotation annually
+
+-----
+
+### **8. NETWORK & DATA TRANSFER**
+
+|Service                     |Specification                     |Monthly Cost|Annual Cost|
+|----------------------------|----------------------------------|------------|-----------|
+|**VPC Endpoints**           |5 endpoints + 33TB/month processed|$367        |$4,404     |
+|**Cross-Region Replication**|500TB initial + 33TB/month ongoing|$1,493      |$17,920    |
+|**SUBTOTAL**                |                                  |**$1,860**  |**$22,324**|
+
+**Details:**
+
+- VPC Endpoints for private S3, Glue, Athena, Lambda, Secrets Manager access
+- Initial 500TB replicated to Canada West DR region (one-time $10K)
+- Ongoing 1.1TB/day × 30 = 33TB/month cross-region replication
+- No internet egress charges (all traffic internal to AWS)
+
+-----
+
+### **9. DEVELOPMENT & TESTING ENVIRONMENTS**
+
+|Item                     |Calculation                                   |Monthly Cost|Annual Cost |
+|-------------------------|----------------------------------------------|------------|------------|
+|**Dev/QA Infrastructure**|20% of production (Storage + Compute + Lambda)|$12,438     |$149,257    |
+|**SUBTOTAL**             |                                              |**$12,438** |**$149,257**|
+
+**Details:**
+
+- Dev environment: 20% of production data (100TB)
+- QA environment: Full data for testing (500TB)
+- Shared between development teams
+- Used for ETL testing, schema changes, performance tuning
+
+-----
+
+### **10. AWS SUPPORT**
+
+|Service             |Specification           |Monthly Cost|Annual Cost|
+|--------------------|------------------------|------------|-----------|
+|**Business Support**|10% of monthly AWS spend|$8,000      |$96,000    |
+|**SUBTOTAL**        |                        |**$8,000**  |**$96,000**|
+
+**Details:**
+
+- Business Support tier (24/7 phone + email support)
+- Includes Trusted Advisor checks
+- Technical Account Manager available
+- Based on ~$80K monthly spend
+
+-----
+
+### **11. CONTINGENCY BUFFER**
+
+|Item               |Calculation                    |Monthly Cost|Annual Cost|
+|-------------------|-------------------------------|------------|-----------|
+|**Unplanned Costs**|10% buffer for spikes, overruns|$7,913      |$94,952    |
+|**SUBTOTAL**       |                               |**$7,913**  |**$94,952**|
+
+**Details:**
+
+- Data volume spikes (fraud incidents, regulatory changes)
+- Unexpected data quality issues requiring reprocessing
+- Emergency testing and troubleshooting
+- New feed onboarding mid-year
+
+-----
+
+# **TOTAL ANNUAL RUN COST SUMMARY (50 Batch Size)**
+
+|# |Category                  |Monthly Cost|Annual Cost   |% of Total|
+|--|--------------------------|------------|--------------|----------|
+|1 |**Lambda (EDF 50 batch)** |$36,007     |$432,086      |41.2%     |
+|2 |**Storage (S3 - 1.5PB)**  |$20,845     |$250,136      |23.8%     |
+|3 |**Development/Testing**   |$12,438     |$149,257      |14.2%     |
+|4 |**Contingency (10%)**     |$7,913      |$94,952       |9.0%      |
+|5 |**AWS Support (10%)**     |$8,000      |$96,000       |9.1%      |
+|6 |**Processing (Glue ETL)** |$5,339      |$64,065       |6.1%      |
+|7 |**Network & Transfer**    |$1,860      |$22,324       |2.1%      |
+|8 |**Monitoring**            |$1,270      |$15,240       |1.5%      |
+|9 |**Ingestion (SFTP + DMS)**|$1,502      |$18,019       |1.7%      |
+|10|**MWAA (Airflow)**        |$329        |$3,948        |0.4%      |
+|11|**Analytics (Athena)**    |$250        |$3,000        |0.3%      |
+|12|**Security (KMS)**        |$37         |$444          |0.0%      |
+|  |                          |            |              |          |
+|  |**GRAND TOTAL**           |**$87,790** |**$1,049,519**|**100%**  |
+
+-----
+
+## **MONTHLY RUN COST: $87,790**
+
+## **ANNUAL RUN COST: $1,049,519**
+
+-----
+
+## **COST BREAKDOWN BY SERVICE CATEGORY**
+
+### **Top 5 Cost Drivers**
+
+|Rank|Category       |Annual Cost|%  |Driver                               |
+|----|---------------|-----------|---|-------------------------------------|
+|1   |**Lambda**     |$432,086   |41%|36M invocations/month (50 batch size)|
+|2   |**Storage**    |$250,136   |24%|500TB across 4 S3 zones              |
+|3   |**Dev/Testing**|$149,257   |14%|20% production overhead              |
+|4   |**Support**    |$96,000    |9% |10% of spend                         |
+|5   |**Contingency**|$94,952    |9% |10% buffer                           |
+
+-----
+
+## **COST COMPARISON: 50 vs 200 BATCH SIZE**
+
+|Metric                      |50 Batch  |200 Batch|Difference   |
+|----------------------------|----------|---------|-------------|
+|**Lambda Invocations/Month**|36M       |9M       |-75%         |
+|**Lambda Annual Cost**      |$432,086  |$108,022 |**-$324,064**|
+|**Total Annual Cost**       |$1,049,519|$725,455 |**-$324,064**|
+|**Monthly Cost**            |$87,790   |$60,455  |**-$27,335** |
+|**Cost Reduction**          |Baseline  |**-31%** |             |
+
+-----
+
+## **YEAR-BY-YEAR PROJECTION (50 Batch)**
+
+|Year      |Data Volume|Lambda Cost|Total Annual Cost|Notes                      |
+|----------|-----------|-----------|-----------------|---------------------------|
+|**Year 1**|500TB      |$432,086   |$1,049,519       |Baseline with DMS migration|
+|**Year 2**|900TB      |$432,086   |$1,520,000       |Storage grows 80%          |
+|**Year 3**|1,300TB    |$432,086   |$2,120,000       |Storage continues growth   |
+|**Year 4**|1,700TB    |$432,086   |$2,790,000       |Lambda cost stable         |
+|**Year 5**|2,100TB    |$432,086   |$3,550,000       |Storage dominates cost     |
+
+**Note:** Lambda cost remains constant (processes same 1.1TB/day) while storage grows with 7-year retention.
+
+-----
+
+## **ON-PREMISES vs CLOUD COMPARISON**
+
+|Cost Category                          |On-Premises (Annual)|AWS Cloud (Year 1)|Savings             |
+|---------------------------------------|--------------------|------------------|--------------------|
+|**Infrastructure**                     |$2,000,000          |$0                |$2,000,000          |
+|**Software Licenses (Sybase IQ)**      |$600,000            |$0                |$600,000            |
+|**Disaster Recovery Site**             |$800,000            |$24,000           |$776,000            |
+|**Labor (12 FTE @ $140K)**             |$1,680,000          |$0                |$1,680,000          |
+|**Data Center (power, cooling, space)**|$350,000            |$0                |$350,000            |
+|**Network Infrastructure**             |$200,000            |$22,324           |$177,676            |
+|**Monitoring Tools**                   |$150,000            |$15,240           |$134,760            |
+|**AWS Cloud Run Cost**                 |$0                  |$1,049,519        |-$1,049,519         |
+|                                       |                    |                  |                    |
+|**TOTAL**                              |**$5,780,000**      |**$1,049,519**    |**$4,730,481 (82%)**|
+
+-----
+
+## **DETAILED COST JUSTIFICATION**
+
+### **Why Lambda is 41% of Cost**
+
+**Lambda dominates because:**
+
+1. **High-frequency processing:** 36M invocations/month (1.2M/day)
+1. **Real-time requirement:** Can’t batch into larger windows (need <15 min latency)
+1. **Large memory allocation:** 2GB per invocation for performance
+1. **Long execution:** 30 seconds per batch (includes Avro parsing, S3 writes)
+
+**This is expected and normal for real-time streaming workloads.**
+
+-----
+
+### **Why Storage is 24% of Cost**
+
+**Storage costs driven by:**
+
+1. **7-year retention:** Regulatory requirement (FINTRAC/OSFI)
+1. **Three copies:** Staging (reprocessing), Standard (analytics), Archive (DR)
+1. **500TB Year 1:** 90TB historical + 410TB new data
+1. **Multi-tier strategy:** Standard (hot) + Standard-IA (warm) + Glacier (cold)
+
+**This scales linearly with data growth over 7 years.**
+
+-----
+
+### **Why Dev/Testing is 14% of Cost**
+
+**Development overhead includes:**
+
+1. **Dev environment:** 100TB sandbox for developers (20% of prod)
+1. **QA environment:** Full 500TB copy for testing
+1. **Performance testing:** Load testing infrastructure
+1. **Experimentation:** New ETL pattern development
+
+**Industry standard is 20-30% of production costs.**
+
+-----
+
+## **OPTIMIZATION OPPORTUNITIES**
+
+### **Option 1: Increase Batch Size to 200 (RECOMMENDED)**
+
+**Change:** Kafka Event Source Mapping batch size 50 → 200
+
+**Impact:**
+
+- Invocations: 36M → 9M (-75%)
+- Lambda cost: $432K → $108K (-$324K/year)
+- Total cost: $1.05M → $725K (-31%)
+
+**Effort:** Configuration change only (5 minutes)
+
+**Risk:** Low - tested pattern, easy rollback
+
+**Timeline:** Immediate
+
+-----
+
+### **Option 2: Storage Lifecycle Optimization**
+
+**Change:** Enable S3 Intelligent-Tiering + aggressive archival
+
+**Impact:**
+
+- Storage cost: $250K → $175K (-$75K/year)
+- Total cost: $1.05M → $975K (-7%)
+
+**Effort:** 1 week (testing lifecycle policies)
+
+**Risk:** Low - automated by AWS
+
+**Timeline:** Month 1
+
+-----
+
+### **Option 3: Reserved Glue Capacity (Year 2)**
+
+**Change:** Purchase 1-year Glue DPU reserved capacity
+
+**Impact:**
+
+- Glue cost: $63K → $38K (-$25K/year, 40% discount)
+- Total cost: $1.05M → $1.02M (-2%)
+
+**Effort:** Purchase commitment
+
+**Risk:** Low - guaranteed usage
+
+**Timeline:** Year 2
+
+-----
+
+## **RECOMMENDED COST TARGET**
+
+|Scenario                  |Timeline|Annual Cost|Savings     |
+|--------------------------|--------|-----------|------------|
+|**Current (50 batch)**    |Now     |$1,049,519 |Baseline    |
+|**Quick win (200 batch)** |Week 1  |$725,455   |-$324K (31%)|
+|**+ Storage optimization**|Month 1 |$650,455   |-$399K (38%)|
+|**+ Reserved capacity**   |Year 2  |$625,455   |-$424K (40%)|
+
+-----
+
+## **FINAL RECOMMENDATION**
+
+**Year 1 Budget: $1,050,000** (with 50 batch size as requested)
+
+**Optimized Year 2+ Budget: $625,000-$650,000** (with recommended changes)
+
+**Primary optimization: Change batch size to 200 for immediate 31% cost reduction**
+
+-----
+
+**Key Insight:** The 50 batch size is costing you $324K/year vs 200 batch size, with zero functional difference. Recommendation stands: increase to 200 for massive savings.​​​​​​​​​​​​​​​​
+
+
+Does this $232K annual run cost look more reasonable for your 5GB/day EDF streaming workload?**
