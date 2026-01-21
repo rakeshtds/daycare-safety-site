@@ -1,1343 +1,1420 @@
- Perfect! Here’s a **simple, straightforward document** focused just on S3 bucket structure and data flow:
+create database DOCAI_DB;
+use database DOCAI_DB;
+create schema DATA_CATALOG;
+
+select * from DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE;
+create schema insurance_schema;
+-- Create test table with SSN/SIN in standard format
+CREATE OR REPLACE TABLE DOCAI_DB.insurance_schema.Employee_SIN_DATA (
+    employee_id INT,
+    ss_1 VARCHAR(50),  -- Non-obvious column name
+    hire_date DATE,
+    department VARCHAR(50)
+);
+
+-- Insert sample data with standard SSN/SIN format
+INSERT INTO DOCAI_DB.insurance_schema.Employee_SIN_DATA VALUES
+(1, '123-45-6789', '2020-01-15', 'Engineering'),
+(2, '987-65-4321', '2019-06-20', 'Marketing'),
+(3, '456-78-9123', '2021-03-10', 'Sales'),
+(4, '321-65-4987', '2018-11-05', 'HR'),
+(5, '789-12-3456', '2022-07-22', 'Finance'),
+(6, '555-44-3333', '2023-01-10', 'Operations'),
+(7, '111-22-3344', '2021-09-15', 'IT'),
+(8, '999-88-7766', '2020-05-30', 'Legal');
+
+-- Verify the data
+SELECT * FROM DOCAI_DB.insurance_schema.employee_SIN_DATA;
+
+
+
+
+
+-- Add or update SSN/SIN detection rule
+MERGE INTO DOCAI_DB.insurance_schema.DATA_CLASSIFICATION_REFERENCE AS target
+USING (
+    SELECT 
+        'Social Security Number (SSN)' AS DATA_ELEMENT,
+        FALSE AS PUBLIC,
+        FALSE AS INTERNAL_USE,
+        FALSE AS CONFIDENTIAL,
+        TRUE AS RESTRICTED,
+        'RESTRICTED' AS PRIMARY_CLASSIFICATION,
+        PARSE_JSON('["\\\\b\\\\d{3}-\\\\d{2}-\\\\d{4}\\\\b", "\\\\b\\\\d{9}\\\\b"]') AS REGEX_PATTERNS,
+        PARSE_JSON('["ssn", "social_security", "tax_id", "ss_", "sin", "social_insurance"]') AS COLUMN_KEYWORDS,
+        PARSE_JSON('["GDPR", "CCPA", "PIPEDA", "SOX"]') AS COMPLIANCE_REQUIREMENTS,
+        'Government-issued unique identifier (SSN/SIN)' AS DESCRIPTION,
+        '123-45-6789 or 123456789' AS EXAMPLES
+) AS source
+ON target.DATA_ELEMENT = source.DATA_ELEMENT
+WHEN MATCHED THEN UPDATE SET
+    RESTRICTED = source.RESTRICTED,
+    PRIMARY_CLASSIFICATION = source.PRIMARY_CLASSIFICATION,
+    REGEX_PATTERNS = source.REGEX_PATTERNS,
+    COLUMN_KEYWORDS = source.COLUMN_KEYWORDS,
+    COMPLIANCE_REQUIREMENTS = source.COMPLIANCE_REQUIREMENTS,
+    DESCRIPTION = source.DESCRIPTION,
+    EXAMPLES = source.EXAMPLES
+WHEN NOT MATCHED THEN INSERT (
+    DATA_ELEMENT, PUBLIC, INTERNAL_USE, CONFIDENTIAL, RESTRICTED,
+    PRIMARY_CLASSIFICATION, REGEX_PATTERNS, COLUMN_KEYWORDS,
+    COMPLIANCE_REQUIREMENTS, DESCRIPTION, EXAMPLES
+) VALUES (
+    source.DATA_ELEMENT, source.PUBLIC, source.INTERNAL_USE,
+    source.CONFIDENTIAL, source.RESTRICTED, source.PRIMARY_CLASSIFICATION,
+    source.REGEX_PATTERNS, source.COLUMN_KEYWORDS,
+    source.COMPLIANCE_REQUIREMENTS, source.DESCRIPTION, source.EXAMPLES
+);
+
+
+
+-- Check current patterns
+SELECT DATA_ELEMENT, REGEX_PATTERNS 
+FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE
+WHERE DATA_ELEMENT LIKE '%Social%Security%';
+
+-- Update with correct SSN patterns
+UPDATE DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE
+SET REGEX_PATTERNS = PARSE_JSON('["\\\\d{3}-\\\\d{2}-\\\\d{4}", "\\\\d{9}"]'),
+    COLUMN_KEYWORDS = PARSE_JSON('["ssn", "ss", "social_security", "tax_id", "sin", "social_insurance"]')
+WHERE DATA_ELEMENT LIKE '%Social%Security%';
 
------
 
-# **DMINE S3 Bucket Architecture & Data Flow**
-
-**Version:** 1.0  
-**Date:** December 2024
-
------
-
-## **1. S3 Bucket Overview**
-
-The DMINE platform uses **4 S3 buckets** across two zones:
-
-### **Landing Zone (3 Buckets)**
-
-1. **Landing Bucket** - Initial data ingestion
-1. **Staging Bucket** - Daily files with history
-1. **Archive Bucket** - Disaster recovery and reruns
-
-### **Standard Zone (1 Bucket)**
-
-1. **Standard Bucket** - Curated analytics-ready data
-
------
-
-## **2. Landing Zone Buckets**
-
-### **2.1 Landing Bucket**
-
-**Bucket Name:** `s3://bmo-dmine-landing-prod-ca-central/`
-
-**Purpose:**
-
-- Transitory bucket for initial data ingestion
-- First landing point for all data coming from on-premises or external sources
-
-**Data Sources:**
-
-- On-premises Sybase IQ (via AWS DMS)
-- External feeds (fraud intelligence, regulatory lists)
-- File-based sources (SFTP, MFT)
-
-**Encryption:**
-
-- **PGP encrypted** for high-risk/sensitive data (credit cards, SIN, account numbers)
-- Athena **CANNOT** access this bucket (by design for security)
-
-**Retention:**
-
-- **24-48 hours only** (transitory storage)
-- Files automatically deleted after processing
-
-**Folder Structure:**
-
-```
-s3://bmo-dmine-landing-prod-ca-central/
-  ├── fraud/
-  │   ├── cards/transactions/
-  │   └── pos/transactions/
-  ├── aml/
-  │   └── alerts/
-  └── customer/
-      └── profiles/
-```
-
------
-
-### **2.2 Staging Bucket**
-
-**Bucket Name:** `s3://bmo-dmine-staging-prod-ca-central/`
-
-**Purpose:**
-
-- Store daily files with historical feed tracking
-- Maintain 90-day history of ingested files
-- Enable rerun capability in case of failures
-
-**How Data Gets Here:**
-
-1. Process detects file arrival in Landing bucket
-1. PGP decryption performed (if encrypted)
-1. Data re-encrypted with **AWS KMS (AES-256)**
-1. File moved to Staging bucket
-
-**Encryption:**
-
-- **AWS KMS encrypted** (not PGP)
-- Athena and other AWS applications **CAN** read data from this bucket
-
-**Retention:**
-
-- **90 days** of daily files
-- Provides history for troubleshooting and reprocessing
-
-**Folder Structure:**
-
-```
-s3://bmo-dmine-staging-prod-ca-central/
-  ├── fraud/
-  │   ├── cards/
-  │   │   └── transactions/
-  │   │       └── year=2024/month=12/day=03/
-  │   │           └── card_txn_20241203.parquet
-  │   └── pos/
-  ├── aml/
-  │   └── alerts/
-  └── customer/
-      └── profiles/
-```
-
-**Key Features:**
-
-- Daily files stored with date partitioning
-- Each day’s feed maintains its own copy
-- Enables reprocessing if transformation fails
-
------
-
-### **2.3 Archive Bucket**
-
-**Bucket Name:** `s3://bmo-dmine-archive-prod-ca-central/`
-
-**Purpose:**
-
-- **Disaster recovery** backup
-- **Long-term retention** for regulatory compliance (7 years)
-- **Rerun capability** if major failures occur
-
-**How Data Gets Here:**
-
-- **Automatic copy** from Staging bucket
-- Every file in Staging is replicated to Archive
-
-**Encryption:**
-
-- **AWS KMS encrypted** (AES-256)
-
-**Retention:**
-
-- **7 years** (regulatory requirement - FINTRAC/OSFI)
-- Stored in cheaper storage tiers (Glacier) for cost optimization
-
-**Use Cases:**
-
-1. **Disaster Recovery:** If Staging bucket corrupted, restore from Archive
-1. **Rerun Scenarios:** If need to reprocess old data, files available here
-1. **Regulatory Audits:** Historical data accessible for compliance reviews
-
-**Folder Structure:**
-
-```
-s3://bmo-dmine-archive-prod-ca-central/
-  ├── staging-backup/
-  │   └── 2024/12/03/
-  │       └── [copy of all staging files]
-  └── standard-backup/
-      └── [periodic snapshots]
-```
-
------
-
-## **3. Standard Zone Bucket**
-
-### **3.1 Standard Bucket**
-
-**Bucket Name:** `s3://bmo-dmine-standard-prod-ca-central/`
-
-**Purpose:**
-
-- **Analytics-ready curated data** (final DMINE tables)
-- **7-year retention** for regulatory compliance
-- Optimized for consumption by BI tools, ML models, and analysts
-
-**Data Format:**
-
-- **Apache Parquet** (columnar format, optimized for analytics)
-- Snappy compression for performance
-- Date-partitioned for fast queries
-
-**How Data Gets Here:**
-
-1. AWS Glue ETL jobs read from Staging bucket
-1. Apply existing transformations (same logic as legacy Sybase/SSIS)
-1. Copy and merge data into Standard bucket
-1. Write as Parquet files with partitioning
-
-**Encryption:**
-
-- **AWS KMS encrypted** (AES-256)
-
-**Retention:**
-
-- **7 years** of historical data
-- Meets FINTRAC/OSFI regulatory requirements
-
-**Folder Structure:**
-
-```
-s3://bmo-dmine-standard-prod-ca-central/
-  ├── fraud/
-  │   ├── transactions/
-  │   │   └── year=2024/month=12/day=03/
-  │   │       └── part-00000.snappy.parquet
-  │   ├── risk_scores/
-  │   └── investigations/
-  ├── aml/
-  │   ├── alerts/
-  │   ├── customer_risk/
-  │   └── transactions/
-  ├── customer/
-  │   ├── profiles/
-  │   └── relationships/
-  └── reference/
-      ├── products/
-      ├── merchants/
-      └── rules/
-```
-
-**Access:**
-
-- Athena (SQL queries)
-- QuickSight (dashboards and reports)
-- Redshift Spectrum (data warehouse queries)
-- SageMaker (ML model training)
-- Data analysts and business users
-
------
-
-## **4. Data Flow - End-to-End**
-
-### **4.1 Complete Data Pipeline**
-
-```
-On-Premises/External Sources
-         ↓
-    LANDING BUCKET
-    (PGP encrypted, transitory 24-48 hrs)
-         ↓
-    [Decryption Process]
-         ↓
-    STAGING BUCKET ←→ ARCHIVE BUCKET
-    (KMS encrypted, 90-day history)     (DR copy, 7-year retention)
-         ↓
-    [Transformation via Glue ETL]
-         ↓
-    STANDARD BUCKET
-    (Parquet format, 7-year retention)
-         ↓
-    Analytics Consumption
-    (Athena, QuickSight, ML models)
-```
-
------
-
-### **4.2 Step-by-Step Data Flow**
-
-**Step 1: Data Arrival**
-
-- Data from on-premises systems arrives at **Landing Bucket**
-- High-risk data arrives PGP encrypted
-- File arrival triggers automated processing
-
-**Step 2: Landing → Staging**
-
-- Automated process detects new file
-- If PGP encrypted: decrypt using private key
-- Re-encrypt with AWS KMS
-- Move to **Staging Bucket** with date partition
-- Store copy in **Archive Bucket** for DR
-
-**Step 3: Staging → Standard**
-
-- Glue ETL jobs read files from Staging
-- Apply transformations (same business logic as existing Sybase/SSIS)
-- Merge with existing data in Standard bucket:
-  - New records: Insert
-  - Changed records: Update
-  - Deleted records: Soft delete
-- Write output as Parquet files in **Standard Bucket**
-
-**Step 4: Data Consumption**
-
-- Business users query data via Athena
-- BI tools read from Standard bucket
-- ML models train on curated datasets
-
------
-
-## **5. Encryption Strategy**
-
-### **5.1 Landing Bucket - PGP Encryption**
-
-**Why PGP?**
-
-- Highest security for sensitive data in transit
-- Data encrypted on-premises before sending to AWS
-- Prevents Athena access (additional security layer)
-
-**What Data is PGP Encrypted:**
-
-- Credit card numbers
-- Social Insurance Numbers (SIN)
-- Bank account numbers
-- High-risk customer PII
-
-**Process:**
-
-1. On-premises system encrypts file with PGP public key
-1. Encrypted file uploaded to Landing bucket
-1. Lambda function decrypts using PGP private key (stored in AWS Secrets Manager)
-1. Decrypted data immediately re-encrypted with KMS
-1. Written to Staging bucket
-
------
-
-### **5.2 Staging & Standard Buckets - AWS KMS Encryption**
-
-**Why KMS?**
-
-- Native AWS encryption
-- Allows Athena and other AWS services to read data
-- Automatic encryption/decryption
-- Centralized key management
-
-**What Data is KMS Encrypted:**
-
-- All data in Staging bucket
-- All data in Standard bucket
-- All data in Archive bucket
-
-**AWS Services with Access:**
-
-- AWS Glue (ETL processing)
-- Amazon Athena (SQL queries)
-- Amazon EMR (big data processing)
-- Amazon Redshift Spectrum (data warehouse)
-- Amazon SageMaker (ML models)
-
------
-
-## **6. Transformation & DMS Suspension**
-
-### **6.1 Implementing Existing Transformations**
-
-**Current State:**
-
-- Existing Sybase IQ stored procedures and SSIS packages contain transformation logic
-- Business rules, aggregations, joins, calculations already defined
-
-**Migration Approach:**
-
-1. **Document existing transformations:** Map all Sybase/SSIS logic
-1. **Convert to Glue ETL:** Rewrite transformations in PySpark for AWS Glue
-1. **Parallel validation:** Run old and new transformations side-by-side
-1. **Compare outputs:** Ensure cloud results match legacy results
-1. **Cutover:** Switch to cloud pipeline after validation passes
-
------
-
-### **6.2 Copy and Merge Process**
-
-**How Data Moves from Staging to Standard:**
-
-**Daily Process:**
-
-1. Glue ETL job reads today’s files from Staging bucket
-1. Apply transformations (cleansing, enrichment, aggregation)
-1. **Merge with existing data in Standard bucket:**
-
-- **New records:** Insert into target table
-- **Changed records:** Update existing records (based on primary key)
-- **Deleted records:** Mark as deleted (soft delete, not physical delete)
-
-1. Write merged output to Standard bucket as Parquet
-1. Update Glue Data Catalog with new partition
-
-**Example Merge Logic:**
-
-- Staging has today’s transactions: 1,000 new records
-- Standard has historical transactions: 50 million records
-- Glue job merges new 1,000 into existing 50 million
-- Output: Standard bucket now has 50,001,000 records
-
------
-
-### **6.3 DMS Suspension Strategy**
-
-**What is DMS?**
-
-- AWS Database Migration Service
-- Continuously replicates data from Sybase IQ to Landing bucket
-- Captures changes (inserts, updates, deletes) in real-time
-
-**When to Suspend DMS:**
-
-- After end-to-end pipeline is fully established and validated
-- When cloud pipeline proven to deliver same results as legacy
-- After successful parallel run (6 weeks minimum)
-
-**Suspension Process:**
-
-**Phase 1: Parallel Run (Months 1-6)**
-
-- DMS replicates from Sybase to Landing bucket
-- Cloud pipeline processes data through to Standard bucket
-- Legacy Sybase reports still running (users unaffected)
-- Validate cloud data matches Sybase data (reconciliation checks)
-
-**Phase 2: Validation Complete (Month 6)**
-
-- 6 weeks of successful parallel operation
-- Data quality meets SLA (99%+ accuracy)
-- Business users validate curated datasets
-- Executive sign-off obtained
-
-**Phase 3: DMS Suspension (Month 7 onwards)**
-
-- **Table-by-table suspension** (not all at once):
-
-1. Suspend DMS for Table A
-1. Cloud becomes primary source for Table A
-1. Monitor for 30 days
-1. If successful, suspend DMS for Table B
-1. Repeat until all tables migrated
-
-**Why Suspend DMS:**
-
-- Reduce ongoing costs ($108/month per DMS instance)
-- Lower load on source Sybase IQ system
-- Simplify architecture (eliminate redundant layer)
-
-**Rollback Safety:**
-
-- Legacy Sybase kept as hot standby for 90 days
-- Can re-enable DMS within 24 hours if issues detected
-- Staging bucket retains 90-day history for emergency reprocessing
-
------
-
-## **7. Summary**
-
-### **Bucket Summary Table**
-
-|Bucket      |Purpose               |Encryption|Retention  |Athena Access |
-|------------|----------------------|----------|-----------|--------------|
-|**Landing** |Initial ingestion     |PGP       |24-48 hours|No            |
-|**Staging** |Daily files + history |KMS       |90 days    |Yes           |
-|**Archive** |DR + long-term backup |KMS       |7 years    |Emergency only|
-|**Standard**|Curated analytics data|KMS       |7 years    |Yes           |
-
-### **Key Points**
-
-✓ **Landing** is transitory - data doesn’t stay here long (24-48 hours)
-
-✓ **Staging** holds 90 days of daily files for rerun capability
-
-✓ **Archive** is automatic copy for disaster recovery and compliance
-
-✓ **Standard** is the final destination - analytics-ready Parquet data
-
-✓ **PGP encryption** in Landing prevents Athena access (security)
-
-✓ **KMS encryption** in Staging/Standard allows AWS services to read data
-
-✓ **DMS suspended** after cloud pipeline proven reliable (Month 7+)
-
-✓ **Existing transformations** migrated from Sybase/SSIS to Glue ETL
-
-✓ **7-year retention** in Standard bucket meets regulatory requirements
-
------
-
-**End of Document**
-
-Perfect! I’ll create a comprehensive S3 bucket architecture document for you:
-
------
-
-# **DMINE AWS S3 Bucket Architecture & Data Flow**
-
-## **Document Overview**
-
-**Purpose:** Define the S3 bucket structure, data flow, encryption strategy, and operational procedures for the DMINE cloud data platform
-
-**Version:** 1.0  
-**Last Updated:** December 2024  
-**Classification:** Internal - BMO Confidential
-
------
-
-## **1. Executive Summary**
-
-The DMINE AWS data platform implements a multi-zone S3 architecture designed for secure data ingestion, transformation, and long-term retention. The architecture consists of two primary zones:
-
-- **Landing Zone:** Transitory data ingestion with PGP encryption for high-risk data
-- **Standard Zone:** Curated, analytics-ready datasets with 7-year retention in Parquet format
-
-This design ensures data security, regulatory compliance, disaster recovery capability, and optimized performance for analytical consumption.
-
------
-
-## **2. S3 Bucket Architecture Overview**
-
-### **2.1 Landing Zone - Three-Bucket Design**
-
-**Bucket 1: Landing Bucket (Transitory)**
-
-```
-Bucket Name: s3://bmo-dmine-landing-prod-ca-central/
-Purpose: Initial data ingestion point
-Retention: 24-48 hours (transitory)
-Encryption: PGP encrypted (for high-risk/sensitive data)
-Access: Restricted - ingestion processes only
-```
-
-**Bucket 2: Staging Bucket (Daily Files & History)**
-
-```
-Bucket Name: s3://bmo-dmine-staging-prod-ca-central/
-Purpose: Daily file storage with historical feed tracking
-Retention: 90 days (configurable by data source)
-Encryption: AWS KMS (AES-256) after PGP decryption
-Access: AWS services (Glue, Athena, EMR) - read-enabled
-```
-
-**Bucket 3: Archive Bucket (Disaster Recovery & Rerun)**
-
-```
-Bucket Name: s3://bmo-dmine-archive-prod-ca-central/
-Purpose: Long-term backup and rerun capability
-Retention: 7 years (regulatory compliance)
-Encryption: AWS KMS (AES-256)
-Storage Class: S3 Glacier / Glacier Deep Archive (cost optimization)
-Access: Restricted - emergency recovery only
-```
-
-### **2.2 Standard Zone - Single Bucket Design**
-
-**Bucket: Standard Bucket (Curated Data)**
-
-```
-Bucket Name: s3://bmo-dmine-standard-prod-ca-central/
-Purpose: Analytics-ready, curated DMINE tables
-Retention: 7 years (regulatory requirement - FINTRAC/OSFI)
-Format: Apache Parquet (optimized for analytics)
-Encryption: AWS KMS (AES-256)
-Partitioning: By date, domain, and table for query performance
-Access: Athena, QuickSight, Redshift Spectrum, SageMaker
-```
-
------
-
-## **3. Data Flow & Processing Pipeline**
-
-### **3.1 End-to-End Data Flow**
-
-```
-On-Premises Sources → Landing Bucket → Staging Bucket → Standard Bucket
-                           ↓                ↓
-                    Archive Bucket    Archive Bucket
-```
-
-### **3.2 Stage 1: Landing Bucket (Initial Ingestion)**
-
-**Data Sources:**
-
-- On-premises Sybase IQ (via AWS DMS - Database Migration Service)
-- External feeds (fraud intelligence, regulatory lists)
-- File-based sources (SFTP, MFT)
-- Real-time streams (future: Kinesis)
-
-**Ingestion Process:**
-
-1. Data arrives at Landing bucket via:
-
-- AWS DMS for database sources
-- AWS Transfer Family (SFTP) for file-based sources
-- Direct S3 upload for batch files
-
-1. **PGP Encryption Applied:** High-risk/sensitive data encrypted at source before landing
-
-- Credit card data, SIN numbers, account details
-- Encryption keys managed via AWS Secrets Manager
-
-1. **Transitory Nature:** Files remain in Landing for 24-48 hours only
-1. **Athena Access Blocked:** PGP-encrypted files cannot be queried by Athena (by design for security)
-
-**Folder Structure Example:**
-
-```
-s3://bmo-dmine-landing-prod-ca-central/
-  ├── fraud/
-  │   ├── cards/
-  │   │   └── transactions/
-  │   │       └── 2024-12-03/
-  │   │           └── card_txn_20241203_123045.dat.pgp
-  │   └── pos/
-  ├── aml/
-  │   └── alerts/
-  └── customer/
-      └── profiles/
-```
-
-**Triggers:**
-
-- S3 Event Notification triggers AWS Lambda function upon file arrival
-- Lambda initiates processing workflow (Step Functions)
-
------
-
-### **3.3 Stage 2: Staging Bucket (Daily Files & History)**
-
-**Processing Flow:**
-
-**Step 1: PGP Decryption**
-
-- AWS Lambda function triggered by Landing bucket event
-- Retrieves PGP private key from AWS Secrets Manager
-- Decrypts file and validates integrity (checksum validation)
-
-**Step 2: AES-256 Encryption (AWS KMS)**
-
-- Decrypted data immediately re-encrypted using AWS KMS Customer Managed Key (CMK)
-- Server-side encryption (SSE-KMS) applied automatically
-- Encryption key specific to DMINE platform (separate from enterprise keys)
-
-**Step 3: File Storage & Historical Tracking**
-
-- Each daily file stored with timestamp and version tracking
-- Maintains 90-day rolling history of all ingested files
-- Enables reprocessing/rerun capability if needed
-
-**Step 4: Athena & AWS Service Access Enabled**
-
-- KMS-encrypted data readable by authorized AWS services
-- Glue Data Catalog automatically updated with schema metadata
-- Athena queries enabled for data validation and QA
-
-**Folder Structure Example:**
-
-```
-s3://bmo-dmine-staging-prod-ca-central/
-  ├── fraud/
-  │   ├── cards/
-  │   │   └── transactions/
-  │   │       ├── year=2024/
-  │   │       │   └── month=12/
-  │   │       │       └── day=03/
-  │   │       │           ├── card_txn_20241203_123045.parquet
-  │   │       │           └── card_txn_20241203_145030.parquet
-  │   │       └── _SUCCESS (completion marker)
-  │   └── history/
-  │       └── 2024-12-03/
-  │           └── manifest.json (file tracking metadata)
-  └── aml/
-```
-
-**Data Retention:**
-
-- **90-day retention policy:** Files older than 90 days automatically transitioned to Archive bucket
-- Lifecycle policy managed via S3 Lifecycle Configuration
-
-**Rerun Capability:**
-
-- If transformation fails, original staging files available for reprocessing
-- No need to re-ingest from source systems
-- Reduces load on on-premises systems
-
------
-
-### **3.4 Stage 3: Archive Bucket (Disaster Recovery)**
-
-**Purpose:**
-
-- Long-term backup for disaster recovery scenarios
-- Regulatory compliance (7-year retention requirement)
-- Emergency rerun capability if catastrophic failure
-
-**Copy Process:**
-
-- **Automated S3 Replication:** All files in Staging bucket automatically replicated to Archive
-- Replication triggers upon file creation in Staging
-- Near real-time replication (typically <15 minutes)
-
-**Storage Optimization:**
-
-- **S3 Intelligent-Tiering:** Automatically moves data between access tiers based on usage patterns
-  - Frequent Access (first 30 days): Standard S3
-  - Infrequent Access (30-90 days): S3 Standard-IA
-  - Archive Access (90+ days): S3 Glacier Instant Retrieval
-  - Deep Archive (1+ years): S3 Glacier Deep Archive
-
-**Cost Savings:**
-
-- Glacier Deep Archive: 95% cheaper than Standard S3 ($0.00099/GB/month vs. $0.023/GB/month)
-- 7-year retention becomes cost-effective for regulatory compliance
-
-**Recovery Scenarios:**
-
-1. **Data Corruption in Staging:** Restore from Archive bucket to Staging
-1. **Regional Failure:** Archive replicated to Canada West region (cross-region replication)
-1. **Accidental Deletion:** S3 Versioning enabled - previous versions recoverable
-
-**Folder Structure Example:**
-
-```
-s3://bmo-dmine-archive-prod-ca-central/
-  ├── staging-backup/
-  │   └── 2024/
-  │       └── 12/
-  │           └── 03/
-  │               └── [mirrored staging files]
-  └── standard-backup/
-      └── 2024/
-          └── Q4/
-              └── [periodic snapshots of curated data]
-```
-
------
-
-### **3.5 Stage 4: Standard Bucket (Curated Analytics Data)**
-
-**Purpose:**
-
-- **Analytics-ready datasets:** Final curated tables for consumption by BI tools, ML models, and analysts
-- **7-year historical retention:** Regulatory compliance (FINTRAC, OSFI requirements)
-- **Optimized format:** Apache Parquet for fast query performance
-
-**Data Transformation Process:**
-
-**Step 1: Implement Existing Transformations**
-
-- Migrate existing Sybase IQ/SSIS transformation logic to AWS Glue ETL jobs
-- Business rules, aggregations, joins, and calculations preserved
-- Transformation code version-controlled in Git repository
-
-**Step 2: Copy & Merge from Staging to Standard**
-
-- AWS Glue ETL jobs read from Staging bucket
-- Apply transformations (cleansing, enrichment, aggregation)
-- **Merge logic:**
-  - New records inserted
-  - Changed records updated (CDC - Change Data Capture via DMS)
-  - Deleted records soft-deleted (marked with deletion flag, not physically removed)
-- Write to Standard bucket in Parquet format with partitioning
-
-**Step 3: Data Quality Validation**
-
-- Automated quality checks run post-transformation
-- Record counts, null checks, business rule validation
-- Quality metrics logged to CloudWatch
-- Failed quality checks trigger SNS alerts to Data Engineering team
-
-**Step 4: Glue Data Catalog Update**
-
-- Table schemas registered in AWS Glue Data Catalog
-- Partitions automatically added (date-based partitioning)
-- Business metadata tagged (domain, sensitivity, owner)
-
-**Parquet Format Benefits:**
-
-- **Columnar storage:** 10x faster queries vs. row-based formats (CSV, JSON)
-- **Compression:** 70-80% storage reduction vs. uncompressed text files
-- **Schema evolution:** Add columns without breaking existing queries
-- **Predicate pushdown:** Athena/Redshift only read relevant columns/partitions
-
-**Folder Structure Example:**
-
-```
-s3://bmo-dmine-standard-prod-ca-central/
-  ├── fraud/
-  │   ├── transactions/
-  │   │   └── year=2024/
-  │   │       └── month=12/
-  │   │           └── day=03/
-  │   │               └── part-00000.snappy.parquet
-  │   ├── risk_scores/
-  │   │   └── year=2024/
-  │   │       └── month=12/
-  │   │           └── risk_score_daily.snappy.parquet
-  │   └── investigations/
-  ├── aml/
-  │   ├── alerts/
-  │   ├── customer_risk/
-  │   └── transactions/
-  ├── customer/
-  │   ├── profiles/
-  │   └── relationships/
-  └── reference/
-      ├── products/
-      ├── merchants/
-      └── geographies/
-```
-
-**Partitioning Strategy:**
-
-- **Date partitioning:** year=YYYY/month=MM/day=DD (reduces scan size for time-based queries)
-- **Domain partitioning:** Separate folders by business domain (fraud, aml, customer)
-- **Athena optimization:** Queries scan only relevant partitions (cost and performance optimization)
-
-**Data Retention & Archival:**
-
-- **Active data (0-2 years):** S3 Standard storage class (frequent access)
-- **Historical data (2-5 years):** S3 Standard-IA (monthly reporting, investigations)
-- **Compliance archive (5-7 years):** S3 Glacier Instant Retrieval (audit requests)
-- Lifecycle policies automate transitions based on data age
-
------
-
-### **3.6 DMS Suspension After Pipeline Establishment**
-
-**Migration Approach:**
-
-**Phase 1: Parallel Run (Months 1-6)**
-
-- AWS DMS continuously replicates data from Sybase IQ to Landing bucket
-- New Glue ETL pipelines run in parallel with legacy SSIS jobs
-- Data reconciliation validates cloud pipelines match legacy output
-
-**Phase 2: Validation & Cutover (Month 6)**
-
-- 6-week parallel run completed successfully
-- Cloud pipeline data quality meets SLA (≥99%)
-- Business users validate curated datasets in Standard bucket
-- Executive approval obtained for cutover
-
-**Phase 3: DMS Suspension (Month 7)**
-
-- **Table-by-table suspension:** Not all-at-once, gradual cutover
-
-1. Suspend DMS replication for validated table
-1. Cloud pipeline becomes primary data source
-1. Legacy Sybase table marked read-only (not deleted yet)
-1. Monitor for 30 days, then decommission legacy table
-
-**DMS Suspension Benefits:**
-
-- **Reduce DMS costs:** $0.15/hour per replication instance × 24/7 = $108/month per instance
-- **Lower source system load:** Eliminate continuous CDC queries on Sybase IQ
-- **Simplify architecture:** Remove redundant data movement layer
-
-**Fallback Plan:**
-
-- Legacy Sybase maintained as hot standby for 90 days post-DMS suspension
-- Can re-enable DMS replication within 24 hours if critical issues discovered
-- Staging bucket retains 90-day history for emergency reprocessing
-
------
-
-## **4. Encryption Strategy**
-
-### **4.1 Landing Bucket - PGP Encryption**
-
-**Use Case:** High-risk/sensitive data requiring end-to-end encryption
-
-**PGP Encryption Details:**
-
-- **Algorithm:** RSA 4096-bit keys + AES-256 symmetric encryption
-- **Key Management:** PGP private keys stored in AWS Secrets Manager
-- **Key Rotation:** Annual key rotation policy enforced
-- **Source-side encryption:** Data encrypted on-premises before transmission to AWS
-
-**Data Categories Requiring PGP:**
-
-- Credit card numbers (PAN - Primary Account Number)
-- Social Insurance Numbers (SIN)
-- Bank account numbers
-- Customer PII (Personally Identifiable Information)
-
-**Workflow:**
-
-1. On-premises system encrypts file using PGP public key
-1. Encrypted file (.pgp extension) uploaded to Landing bucket via SFTP/S3 upload
-1. Lambda function detects .pgp file, retrieves private key from Secrets Manager
-1. File decrypted in-memory (never stored unencrypted)
-1. Re-encrypted with KMS and written to Staging bucket
-
-**Security Benefits:**
-
-- **Data in transit:** Encrypted during transmission (TLS + PGP)
-- **Data at rest:** Encrypted in Landing bucket (PGP layer + S3 default encryption)
-- **Access control:** Athena cannot query PGP files (prevents unauthorized data exploration)
-
------
-
-### **4.2 Staging & Standard Buckets - AWS KMS Encryption**
-
-**Use Case:** AWS-native encryption for service integration and performance
-
-**KMS Encryption Details:**
-
-- **Server-Side Encryption (SSE-KMS):** Automatic encryption at rest
-- **Customer Managed Key (CMK):** DMINE-specific encryption key
-- **Key Alias:** `alias/dmine-data-platform-key`
-- **Key Policy:** Restricted to authorized IAM roles and services
-
-**AWS Services with KMS Access:**
-
-- AWS Glue (ETL jobs, crawlers, Data Catalog)
-- Amazon Athena (interactive queries)
-- Amazon EMR (Spark processing)
-- Amazon Redshift Spectrum (federated queries)
-- Amazon SageMaker (ML model training)
-
-**Encryption in Transit:**
-
-- **TLS 1.2+:** All data transfers encrypted (S3 to Glue, Glue to Athena, etc.)
-- **VPC Endpoints:** Private network connectivity within AWS (no internet exposure)
-
-**Audit & Compliance:**
-
-- **AWS CloudTrail:** Logs all KMS key usage (who accessed what, when)
-- **Key Rotation:** Automatic annual key rotation enabled
-- **Compliance:** Meets PIPEDA, OSFI, PCI-DSS encryption requirements
-
------
-
-## **5. Data Lifecycle & Retention Policies**
-
-### **5.1 Landing Bucket Lifecycle**
-
-|Age        |Action             |Reason                                  |
-|-----------|-------------------|----------------------------------------|
-|0-24 hours |Remain in Landing  |Processing window                       |
-|24-48 hours|Delete from Landing|Transitory bucket, data moved to Staging|
-
-**S3 Lifecycle Policy:**
-
-```json
-{
-  "Rules": [
-    {
-      "Id": "DeleteAfter48Hours",
-      "Status": "Enabled",
-      "ExpirationInDays": 2,
-      "NoncurrentVersionExpirationInDays": 1
-    }
-  ]
-}
-```
-
------
-
-### **5.2 Staging Bucket Lifecycle**
-
-|Age       |Action                |Storage Class |Monthly Cost/GB|
-|----------|----------------------|--------------|---------------|
-|0-30 days |Active                |S3 Standard   |$0.023         |
-|30-90 days|Archive               |S3 Standard-IA|$0.0125        |
-|90+ days  |Copy to Archive bucket|S3 Glacier    |$0.004         |
-|90+ days  |Delete from Staging   |Deleted       |-              |
-
-**Retention Purpose:**
-
-- **90-day window:** Allows reprocessing if transformation failures detected
-- **Historical tracking:** Maintains feed history for troubleshooting
-- **Cost optimization:** Balance between availability and storage cost
-
------
-
-### **5.3 Archive Bucket Lifecycle**
-
-|Age              |Action      |Storage Class          |Monthly Cost/GB|Retrieval Time|
-|-----------------|------------|-----------------------|---------------|--------------|
-|0-90 days        |Hot archive |S3 Glacier Instant     |$0.004         |Milliseconds  |
-|90 days - 2 years|Cold archive|S3 Glacier Flexible    |$0.0036        |3-5 hours     |
-|2-7 years        |Deep archive|S3 Glacier Deep Archive|$0.00099       |12 hours      |
-|7+ years         |Delete      |Compliance met         |-              |-             |
-
-**Regulatory Compliance:**
-
-- **FINTRAC:** 5-year retention for AML transaction data
-- **OSFI:** 7-year retention for regulatory reporting data
-- **BMO Policy:** 7-year retention (most conservative requirement applies)
-
-**Cost Example:**
-
-- 500 TB Standard S3 (7 years): $11.5M
-- 500 TB Glacier Deep Archive (7 years): $495K
-- **Savings: $11M over 7 years** (96% cost reduction)
-
------
-
-### **5.4 Standard Bucket Lifecycle**
-
-|Age      |Action              |Storage Class     |Purpose                             |
-|---------|--------------------|------------------|------------------------------------|
-|0-2 years|Active analytics    |S3 Standard       |Frequent queries (daily/weekly)     |
-|2-5 years|Historical analytics|S3 Standard-IA    |Monthly reporting, investigations   |
-|5-7 years|Compliance archive  |S3 Glacier Instant|Audit requests, regulatory inquiries|
-|7+ years |Delete              |Retention met     |Regulatory requirement satisfied    |
-
-**Parquet Compression:**
-
-- Snappy compression reduces storage by 70-80%
-- 500 TB raw data → ~100-150 TB compressed Parquet
-- Further reduces lifecycle storage costs
-
------
-
-## **6. Access Control & Security**
-
-### **6.1 IAM Policies by Bucket**
-
-**Landing Bucket:**
-
-- **Write:** AWS DMS service role, AWS Transfer Family, on-premises SFTP users
-- **Read:** Lambda decryption function only
-- **Delete:** Lifecycle policy automation only
-
-**Staging Bucket:**
-
-- **Write:** Lambda decryption function, Glue ETL jobs
-- **Read:** Glue crawlers, Athena, EMR, authorized data engineers
-- **Delete:** Lifecycle policy automation only
-
-**Standard Bucket:**
-
-- **Write:** Glue ETL jobs only (curated data pipeline)
-- **Read:** Athena, QuickSight, Redshift Spectrum, SageMaker, authorized analysts
-- **Delete:** Lifecycle policy automation only
-
-**Archive Bucket:**
-
-- **Write:** S3 replication from Staging/Standard buckets
-- **Read:** Break-glass emergency access (CISO approval required)
-- **Delete:** Lifecycle policy automation after 7 years
-
------
-
-### **6.2 Bucket Policies - Sample**
-
-**Landing Bucket - Restrict to Encryption in Transit:**
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "DenyInsecureTransport",
-      "Effect": "Deny",
-      "Principal": "*",
-      "Action": "s3:*",
-      "Resource": "arn:aws:s3:::bmo-dmine-landing-prod-ca-central/*",
-      "Condition": {
-        "Bool": {
-          "aws:SecureTransport": "false"
-        }
-      }
-    }
-  ]
-}
-```
-
-**Standard Bucket - Enforce KMS Encryption:**
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "DenyUnencryptedObjectUploads",
-      "Effect": "Deny",
-      "Principal": "*",
-      "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::bmo-dmine-standard-prod-ca-central/*",
-      "Condition": {
-        "StringNotEquals": {
-          "s3:x-amz-server-side-encryption": "aws:kms"
-        }
-      }
-    }
-  ]
-}
-```
-
------
-
-### **6.3 S3 Block Public Access**
-
-**All Buckets - Public Access Blocked:**
-
-- BlockPublicAcls: True
-- IgnorePublicAcls: True
-- BlockPublicPolicy: True
-- RestrictPublicBuckets: True
-
-**Rationale:** No DMINE data should ever be publicly accessible (financial crime data is highly sensitive)
-
------
-
-### **6.4 Logging & Monitoring**
-
-**S3 Server Access Logging:**
-
-- All object-level access logged to dedicated audit bucket
-- Logs retained for 7 years (compliance requirement)
-
-**AWS CloudTrail:**
-
-- All API calls logged (PutObject, GetObject, DeleteObject)
-- Who accessed what data, when, from where
-
-**CloudWatch Metrics:**
-
-- Bucket size, object count, request metrics
-- Alerts for unusual access patterns (e.g., mass downloads)
-
-**AWS Macie (Optional):**
-
-- Automated PII discovery and classification
-- Alerts if unencrypted sensitive data detected
-
------
-
-## **7. Disaster Recovery & Cross-Region Replication**
-
-### **7.1 Multi-Region Architecture**
-
-**Primary Region:** Canada Central (ca-central-1)
-**DR Region:** Canada West (future: ca-west-1, when available)
-
-**Replication Strategy:**
-
-- **S3 Cross-Region Replication (CRR):** Asynchronous replication to DR region
-- **Replication Scope:** Staging and Standard buckets replicated
-- **Landing Bucket:** Not replicated (transitory data, 48-hour retention)
-- **Archive Bucket:** Replicated with lifecycle policies applied in DR region
-
-**Replication Configuration:**
-
-```json
-{
-  "Role": "arn:aws:iam::ACCOUNT_ID:role/S3ReplicationRole",
-  "Rules": [
-    {
-      "Status": "Enabled",
-      "Priority": 1,
-      "Filter": {
-        "Prefix": ""
-      },
-      "Destination": {
-        "Bucket": "arn:aws:s3:::bmo-dmine-standard-dr-ca-west",
-        "ReplicationTime": {
-          "Status": "Enabled",
-          "Time": {
-            "Minutes": 15
-          }
-        }
-      }
-    }
-  ]
-}
-```
-
-**Recovery Point Objective (RPO):** <15 minutes (near real-time replication)
-
-**Recovery Time Objective (RTO):** <4 hours (spin up compute in DR region)
-
------
-
-### **7.2 Disaster Recovery Scenarios**
-
-**Scenario 1: Bucket Corruption/Accidental Deletion**
-
-- **S3 Versioning Enabled:** Recover previous version of object
-- **Recovery Time:** <15 minutes
-- **Process:** Restore object from version history via AWS CLI/Console
-
-**Scenario 2: Regional Outage (Canada Central)**
-
-- **DR Region Activation:** Switch to Canada West region
-- **Data Availability:** Immediate (replicated S3 buckets)
-- **Compute Restoration:** Deploy Glue jobs, EMR clusters in Canada West (2-4 hours)
-- **Process:** Update DNS/endpoints to point to DR region infrastructure
-
-**Scenario 3: Data Quality Issue Requiring Historical Rerun**
-
-- **Source:** Archive bucket (90-day history)
-- **Recovery Time:** <2 hours (reprocess from archived staging files)
-- **Process:** Copy archived files back to Staging, re-run Glue ETL jobs
-
------
-
-### **7.3 Backup Validation**
-
-**Monthly DR Drills:**
-
-- Restore sample dataset from DR region
-- Validate data integrity (checksums, record counts)
-- Measure actual RTO/RPO vs. targets
-- Document lessons learned, update runbooks
-
------
-
-## **8. Cost Optimization**
-
-### **8.1 Storage Cost Breakdown (Estimated Annual)**
-
-|Bucket               |Data Volume |Storage Class         |Monthly Cost|Annual Cost |
-|---------------------|------------|----------------------|------------|------------|
-|Landing (transitory) |10 TB       |S3 Standard           |$230        |$2,760      |
-|Staging (90-day)     |150 TB      |S3 Standard/IA        |$2,250      |$27,000     |
-|Archive (7-year)     |2,000 TB    |Glacier Deep          |$1,980      |$23,760     |
-|Standard (active)    |200 TB      |S3 Standard           |$4,600      |$55,200     |
-|Standard (historical)|300 TB      |S3 Standard-IA/Glacier|$1,500      |$18,000     |
-|**Total Storage**    |**2,660 TB**|**Mixed**             |**$10,560** |**$126,720**|
-
-**Data Transfer Costs:**
-
-- Inbound (on-prem to S3): Free
-- Outbound (S3 to Athena/Glue): Free (same region)
-- Cross-region replication: ~$20K/year (150 TB × $0.02/GB transfer)
-
-**Total Annual Storage + Transfer: ~$147K**
-
------
-
-### **8.2 Cost Optimization Strategies**
-
-**1. Intelligent-Tiering:**
-
-- Automatically moves data between access tiers
-- Saves 25-30% on storage costs
-- No retrieval fees (unlike Glacier)
-
-**2. S3 Lifecycle Policies:**
-
-- Automate transitions to cheaper storage classes
-- Delete expired data (no manual cleanup needed)
-
-**3. Parquet Compression:**
-
-- 70-80% storage reduction vs. CSV/JSON
-- Snappy compression (fast) for hot data
-- Gzip compression (higher ratio) for cold data
-
-**4. Partitioning Strategy:**
-
-- Athena queries scan only relevant partitions
-- 90% reduction in data scanned = 90% lower query costs
-- Example: Query 1 day of data instead of full table (365x cost reduction)
-
-**5. S3 Request Optimization:**
-
-- Batch small files into larger objects (reduce PUT requests)
-- Use S3 Select for filtering (reduce data transfer)
-
-**6. Reserved Capacity (Glue DPU):**
-
-- Purchase reserved Glue capacity for predictable workloads
-- 40% discount vs. on-demand pricing
-
------
-
-## **9. Operational Procedures**
-
-### **9.1 New Data Source Onboarding**
-
-**Step 1: Requirements Gathering (1-2 days)**
-
-- Data source owner submits intake form
-- Data volume, refresh frequency, sensitivity classification
-- Sample data files provided
-
-**Step 2: S3 Folder Structure Creation (1 day)**
-
-- Create folders in Landing, Staging, Standard buckets
-- Apply appropriate IAM policies and encryption settings
-- Configure S3 event notifications
-
-**Step 3: Ingestion Pipeline Setup (3-5 days)**
-
-- Configure AWS DMS (database sources) or AWS Transfer Family (SFTP)
-- Set up Lambda decryption function (if PGP required)
-- Test end-to-end ingestion to Staging bucket
-
-**Step 4: Glue ETL Development (5-10 days)**
-
-- Develop transformation logic (Glue PySpark jobs)
-- Implement data quality checks
-- Configure Glue crawlers for schema discovery
-
-**Step 5: Validation & Go-Live (3-5 days)**
-
-- Parallel run with source system validation
-- Business user acceptance testing
-- Production deployment and monitoring
-
-**Total Timeline: 2-3 weeks** (varies by complexity)
-
------
-
-### **9.2 Data Quality Monitoring**
-
-**Automated Checks (Post-Ingestion):**
-
-- **Completeness:** Record count validation against source manifest
-- **Freshness:** Data arrival time vs. expected schedule (<15 min tolerance)
-- **Schema drift:** Detect unexpected column changes
-- **Null value checks:** <1% for mandatory fields
-
-**Athena Queries for QA:**
-
-```sql
--- Daily record count check
 SELECT 
-  COUNT(*) as record_count,
-  DATE(load_timestamp) as load_date
-FROM staging.fraud_transactions
-WHERE year = 2024 AND month = 12 AND day = 3
-GROUP BY DATE(load_timestamp);
+    DATA_ELEMENT,
+    REGEX_PATTERNS,
+    COLUMN_KEYWORDS
+FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE
+WHERE DATA_ELEMENT LIKE '%Social%';
 
--- Null value percentage check
+
+
+-- ============================================
+-- CDE Reference Table Creation Script
+-- Based on Pacific Life's Critical Data Elements Excel
+-- ============================================
+
+-- 1. Create the main CDE Reference Table
+CREATE OR REPLACE TABLE CDE_REFERENCE (
+    CDE_ID NUMBER AUTOINCREMENT,
+    DOMAIN VARCHAR(200) COMMENT 'Business domain (e.g., Claims, Coverage/Rider, Investment Funds, New Business/Application, Financial Professional)',
+    TAG VARCHAR(200) COMMENT 'Tag/Category of the data element (e.g., Event Details, Financial Metrics, Core Component Info)',
+    ATTRIBUTE_LOGICAL_NAME VARCHAR(500) COMMENT 'Logical name of the attribute as defined in the data dictionary',
+    IS_PII VARCHAR(1) COMMENT 'Flag indicating if this is Personally Identifiable Information (Y/N)',
+    DEFINITION TEXT COMMENT 'Detailed definition/description of the critical data element',
+    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    UPDATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    IS_ACTIVE BOOLEAN DEFAULT TRUE COMMENT 'Flag to soft-delete records',
+    PRIMARY KEY (CDE_ID)
+) COMMENT = 'Reference table containing Critical Data Element definitions and metadata';
+
+-- 2. Create indexes for better query performance
+
+-- 3. Create a table to store pattern matching rules
+-- This allows flexible matching of actual column names to CDE logical names
+CREATE OR REPLACE TABLE CDE_PATTERN_RULES (
+    PATTERN_ID NUMBER AUTOINCREMENT,
+    CDE_ID NUMBER COMMENT 'Foreign key to CDE_REFERENCE',
+    PATTERN_TYPE VARCHAR(50) COMMENT 'Type of pattern: EXACT, CONTAINS, STARTS_WITH, ENDS_WITH, REGEX',
+    PATTERN_VALUE VARCHAR(500) COMMENT 'The pattern to match against database column names',
+    PATTERN_PRIORITY NUMBER DEFAULT 100 COMMENT 'Priority for pattern matching (lower = higher priority)',
+    IS_ACTIVE BOOLEAN DEFAULT TRUE,
+    CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+    PRIMARY KEY (PATTERN_ID),
+    FOREIGN KEY (CDE_ID) REFERENCES CDE_REFERENCE(CDE_ID)
+) COMMENT = 'Pattern matching rules to identify CDEs in actual database columns';
+
+CREATE INDEX IF NOT EXISTS IDX_CDE_PATTERN_CDE_ID ON CDE_PATTERN_RULES(CDE_ID);
+CREATE INDEX IF NOT EXISTS IDX_CDE_PATTERN_TYPE ON CDE_PATTERN_RULES(PATTERN_TYPE);
+CREATE INDEX IF NOT EXISTS IDX_CDE_PATTERN_ACTIVE ON CDE_PATTERN_RULES(IS_ACTIVE);
+
+-- 4. Create scan results table
+CREATE OR REPLACE TABLE CDE_SCAN_RESULTS (
+    SCAN_ID NUMBER AUTOINCREMENT,
+    SCAN_RUN_ID VARCHAR(100) COMMENT 'Unique identifier for each scan execution',
+    SCAN_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    SCAN_USER VARCHAR(100) DEFAULT CURRENT_USER(),
+    DATABASE_NAME VARCHAR(200),
+    SCHEMA_NAME VARCHAR(200),
+    TABLE_NAME VARCHAR(200),
+    COLUMN_NAME VARCHAR(200),
+    DATA_TYPE VARCHAR(100),
+    -- Matched CDE Information
+    MATCHED_CDE_ID NUMBER COMMENT 'Foreign key to CDE_REFERENCE',
+    MATCHED_DOMAIN VARCHAR(200),
+    MATCHED_TAG VARCHAR(200),
+    MATCHED_ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
+    MATCHED_IS_PII VARCHAR(1),
+    MATCHED_DEFINITION TEXT,
+    -- Matching Details
+    PATTERN_ID NUMBER COMMENT 'Which pattern rule matched',
+    PATTERN_TYPE VARCHAR(50),
+    PATTERN_VALUE VARCHAR(500),
+    MATCH_SCORE NUMBER(5,2) COMMENT 'Confidence score of the match (0-100)',
+    MATCH_REASON VARCHAR(2000) COMMENT 'Detailed explanation of why this column matched',
+    -- Metadata
+    IS_REVIEWED BOOLEAN DEFAULT FALSE COMMENT 'Has this match been reviewed by a human?',
+    REVIEW_STATUS VARCHAR(50) COMMENT 'CONFIRMED, REJECTED, NEEDS_REVIEW',
+    REVIEW_NOTES TEXT,
+    REVIEWED_BY VARCHAR(100),
+    REVIEWED_DATE TIMESTAMP_NTZ,
+    PRIMARY KEY (SCAN_ID),
+    FOREIGN KEY (MATCHED_CDE_ID) REFERENCES CDE_REFERENCE(CDE_ID)
+) COMMENT = 'Results of CDE scans showing which database columns match CDE definitions';
+
+
+
+-- 6. Create audit log table
+CREATE OR REPLACE TABLE CDE_AUDIT_LOG (
+    AUDIT_ID NUMBER AUTOINCREMENT,
+    AUDIT_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    AUDIT_USER VARCHAR(100) DEFAULT CURRENT_USER(),
+    TABLE_NAME VARCHAR(100) COMMENT 'Which table was modified',
+    OPERATION VARCHAR(50) COMMENT 'INSERT, UPDATE, DELETE',
+    RECORD_ID NUMBER COMMENT 'ID of the affected record',
+    OLD_VALUE VARIANT COMMENT 'Previous values (JSON)',
+    NEW_VALUE VARIANT COMMENT 'New values (JSON)',
+    CHANGE_REASON VARCHAR(500),
+    PRIMARY KEY (AUDIT_ID)
+) COMMENT = 'Audit trail for all changes to CDE reference data and scan results';
+
+
+
+-- 7. Create views for reporting
+
+-- View: Latest scan results (deduplicated)
+CREATE OR REPLACE VIEW VW_CDE_LATEST_SCAN AS
 SELECT 
-  COUNT(*) as total_records,
-  SUM(CASE WHEN card_number IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as null_pct
-FROM staging.fraud_transactions
-WHERE year = 2024 AND month = 12;
-```
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    TABLE_NAME,
+    COLUMN_NAME,
+    DATA_TYPE,
+    MATCHED_DOMAIN,
+    MATCHED_TAG,
+    MATCHED_ATTRIBUTE_LOGICAL_NAME,
+    MATCHED_IS_PII,
+    MATCHED_DEFINITION,
+    MATCH_SCORE,
+    MATCH_REASON,
+    REVIEW_STATUS,
+    MAX(SCAN_DATE) as LATEST_SCAN_DATE,
+    MAX(SCAN_RUN_ID) as LATEST_SCAN_RUN_ID
+FROM CDE_SCAN_RESULTS
+GROUP BY 
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    TABLE_NAME,
+    COLUMN_NAME,
+    DATA_TYPE,
+    MATCHED_DOMAIN,
+    MATCHED_TAG,
+    MATCHED_ATTRIBUTE_LOGICAL_NAME,
+    MATCHED_IS_PII,
+    MATCHED_DEFINITION,
+    MATCH_SCORE,
+    MATCH_REASON,
+    REVIEW_STATUS;
 
-**Alerting:**
+-- View: PII elements only
+CREATE OR REPLACE VIEW VW_CDE_PII_ELEMENTS AS
+SELECT 
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    TABLE_NAME,
+    COLUMN_NAME,
+    DATA_TYPE,
+    MATCHED_DOMAIN,
+    MATCHED_TAG,
+    MATCHED_ATTRIBUTE_LOGICAL_NAME,
+    MATCHED_DEFINITION,
+    MATCH_SCORE,
+    REVIEW_STATUS,
+    SCAN_DATE
+FROM CDE_SCAN_RESULTS
+WHERE MATCHED_IS_PII = 'Y'
+ORDER BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME;
 
-- CloudWatch alarms trigger SNS notifications
-- PagerDuty for P1 critical issues (data not arriving)
-- Email alerts for P2/P3 (quality thresholds breached)
+-- View: Summary by Domain
+CREATE OR REPLACE VIEW VW_CDE_SUMMARY_BY_DOMAIN AS
+SELECT 
+    MATCHED_DOMAIN,
+    COUNT(DISTINCT CONCAT(DATABASE_NAME, '.', SCHEMA_NAME, '.', TABLE_NAME)) as TABLES_WITH_CDE,
+    COUNT(DISTINCT COLUMN_NAME) as TOTAL_CDE_COLUMNS,
+    SUM(CASE WHEN MATCHED_IS_PII = 'Y' THEN 1 ELSE 0 END) as PII_COLUMNS,
+    COUNT(DISTINCT MATCHED_TAG) as UNIQUE_TAGS,
+    AVG(MATCH_SCORE) as AVG_MATCH_SCORE,
+    MAX(SCAN_DATE) as LAST_SCAN_DATE
+FROM CDE_SCAN_RESULTS
+GROUP BY MATCHED_DOMAIN
+ORDER BY TOTAL_CDE_COLUMNS DESC;
 
------
+-- View: Summary by Database/Schema
+CREATE OR REPLACE VIEW VW_CDE_SUMMARY_BY_SCHEMA AS
+SELECT 
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    COUNT(DISTINCT TABLE_NAME) as TABLES_WITH_CDE,
+    COUNT(DISTINCT COLUMN_NAME) as TOTAL_CDE_COLUMNS,
+    SUM(CASE WHEN MATCHED_IS_PII = 'Y' THEN 1 ELSE 0 END) as PII_COLUMNS,
+    COUNT(DISTINCT MATCHED_DOMAIN) as DOMAINS_IDENTIFIED,
+    MAX(SCAN_DATE) as LAST_SCAN_DATE
+FROM CDE_SCAN_RESULTS
+GROUP BY DATABASE_NAME, SCHEMA_NAME
+ORDER BY TOTAL_CDE_COLUMNS DESC;
 
-### **9.3 Data Reprocessing (Rerun Procedure)**
+-- View: Unreviewed matches
+CREATE OR REPLACE VIEW VW_CDE_UNREVIEWED_MATCHES AS
+SELECT 
+    SCAN_ID,
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    TABLE_NAME,
+    COLUMN_NAME,
+    MATCHED_DOMAIN,
+    MATCHED_TAG,
+    MATCHED_ATTRIBUTE_LOGICAL_NAME,
+    MATCHED_IS_PII,
+    MATCH_SCORE,
+    MATCH_REASON,
+    SCAN_DATE
+FROM CDE_SCAN_RESULTS
+WHERE IS_REVIEWED = FALSE
+ORDER BY MATCHED_IS_PII DESC, MATCH_SCORE DESC, SCAN_DATE DESC;
 
-**Scenario:** Transformation job failed, need to reprocess yesterday’s data
+-- 8. Create a stored procedure to generate scan run ID
+CREATE OR REPLACE PROCEDURE SP_GENERATE_SCAN_RUN_ID()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    RETURN 'SCAN_' || TO_VARCHAR(CURRENT_TIMESTAMP(), 'YYYYMMDD_HH24MISS') || '_' || UUID_STRING();
+END;
+$$;
 
-**Step 1: Identify Source Files**
+-- 9. Grant permissions (adjust roles as needed)
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON CDE_REFERENCE TO ROLE YOUR_ROLE;
+-- GRANT SELECT, INSERT, UPDATE ON CDE_PATTERN_RULES TO ROLE YOUR_ROLE;
+-- GRANT SELECT, INSERT, UPDATE ON CDE_SCAN_RESULTS TO ROLE YOUR_ROLE;
+-- GRANT SELECT ON ALL VIEWS IN SCHEMA CURRENT_SCHEMA() TO ROLE YOUR_ROLE;
 
-```bash
-# List files in Staging bucket for specific date
-aws s3 ls s3://bmo-dmine-staging-prod-ca-central/fraud/cards/transactions/year=2024/month=12/day=02/
-```
+-- Verification
+SELECT 'CDE_REFERENCE table created successfully' as STATUS;
+SELECT 'CDE_PATTERN_RULES table created successfully' as STATUS;
+SELECT 'CDE_SCAN_RESULTS table created successfully' as STATUS;
+SELECT 'CDE_AUDIT_LOG table created successfully' as STATUS;
+SELECT 'All views created successfully' as STATUS;
 
-**Step 2: Reset Target Table​​​​​​​​​​​​​​​​
+
+
+
+use schema insurance_schema;
+
+
+-- Insurance Industry Snowflake POC Database Schema and Sample Data
+-- This script creates 25+ insurance-specific tables with realistic dummy data including PII
+
+-- =============================================================================
+-- DDL (Data Definition Language) - Table Creation
+-- =============================================================================
+
+-- 1. CUSTOMERS TABLE
+CREATE OR REPLACE TABLE customers (
+    customer_id NUMBER(10) PRIMARY KEY,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    phone VARCHAR(20),
+    date_of_birth DATE,
+    ssn VARCHAR(11),
+    gender VARCHAR(10),
+    marital_status VARCHAR(20),
+    occupation VARCHAR(100),
+    annual_income NUMBER(12,2),
+    credit_score NUMBER(3),
+    address_line1 VARCHAR(100),
+    address_line2 VARCHAR(100),
+    city VARCHAR(50),
+    state VARCHAR(50),
+    zip_code VARCHAR(10),
+    country VARCHAR(50) DEFAULT 'USA',
+    customer_since DATE DEFAULT CURRENT_DATE(),
+    risk_profile VARCHAR(20) DEFAULT 'MEDIUM',
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- 2. AGENTS TABLE
+CREATE OR REPLACE TABLE agents (
+    agent_id NUMBER(10) PRIMARY KEY,
+    agent_code VARCHAR(20) UNIQUE NOT NULL,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    phone VARCHAR(20),
+    ssn VARCHAR(11),
+    date_of_birth DATE,
+    hire_date DATE,
+    license_number VARCHAR(50),
+    license_state VARCHAR(50),
+    license_expiry_date DATE,
+    agent_type VARCHAR(30), -- 'CAPTIVE', 'INDEPENDENT', 'BROKER'
+    commission_rate NUMBER(5,4) DEFAULT 0.05,
+    territory VARCHAR(100),
+    manager_id NUMBER(10),
+    address_line1 VARCHAR(100),
+    address_line2 VARCHAR(100),
+    city VARCHAR(50),
+    state VARCHAR(50),
+    zip_code VARCHAR(10),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (manager_id) REFERENCES agents(agent_id)
+);
+
+-- 3. INSURANCE_PRODUCTS TABLE
+CREATE OR REPLACE TABLE insurance_products (
+    product_id NUMBER(10) PRIMARY KEY,
+    product_code VARCHAR(20) UNIQUE NOT NULL,
+    product_name VARCHAR(100) NOT NULL,
+    product_type VARCHAR(30), -- 'LIFE', 'AUTO', 'HOME', 'HEALTH', 'ANNUITY'
+    product_category VARCHAR(50),
+    description TEXT,
+    base_premium NUMBER(10,2),
+    min_coverage NUMBER(12,2),
+    max_coverage NUMBER(12,2),
+    age_min NUMBER(3),
+    age_max NUMBER(3),
+    term_years NUMBER(3),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- 4. POLICIES TABLE
+CREATE OR REPLACE TABLE policies (
+    policy_id NUMBER(12) PRIMARY KEY,
+    policy_number VARCHAR(30) UNIQUE NOT NULL,
+    customer_id NUMBER(10) NOT NULL,
+    agent_id NUMBER(10) NOT NULL,
+    product_id NUMBER(10) NOT NULL,
+    policy_status VARCHAR(20) DEFAULT 'ACTIVE',
+    issue_date DATE,
+    effective_date DATE,
+    expiry_date DATE,
+    coverage_amount NUMBER(12,2),
+    premium_amount NUMBER(10,2),
+    premium_frequency VARCHAR(20), -- 'MONTHLY', 'QUARTERLY', 'SEMI_ANNUAL', 'ANNUAL'
+    deductible_amount NUMBER(10,2),
+    beneficiary_name VARCHAR(100),
+    beneficiary_relationship VARCHAR(50),
+    beneficiary_ssn VARCHAR(11),
+    underwriting_status VARCHAR(20) DEFAULT 'APPROVED',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id),
+    FOREIGN KEY (product_id) REFERENCES insurance_products(product_id)
+);
+
+-- 5. ANNUITIES TABLE
+CREATE OR REPLACE TABLE annuities (
+    annuity_id NUMBER(12) PRIMARY KEY,
+    contract_number VARCHAR(30) UNIQUE NOT NULL,
+    customer_id NUMBER(10) NOT NULL,
+    agent_id NUMBER(10) NOT NULL,
+    annuity_type VARCHAR(30), -- 'FIXED', 'VARIABLE', 'INDEXED', 'IMMEDIATE', 'DEFERRED'
+    purchase_amount NUMBER(12,2),
+    current_value NUMBER(12,2),
+    guaranteed_rate NUMBER(5,4),
+    issue_date DATE,
+    maturity_date DATE,
+    annuitization_date DATE,
+    payout_frequency VARCHAR(20), -- 'MONTHLY', 'QUARTERLY', 'ANNUAL'
+    payout_amount NUMBER(10,2),
+    surrender_charge_rate NUMBER(5,4),
+    contract_status VARCHAR(20) DEFAULT 'ACTIVE',
+    beneficiary_name VARCHAR(100),
+    beneficiary_relationship VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+);
+
+-- 6. CLAIMS TABLE
+CREATE OR REPLACE TABLE claims (
+    claim_id NUMBER(12) PRIMARY KEY,
+    claim_number VARCHAR(30) UNIQUE NOT NULL,
+    policy_id NUMBER(12) NOT NULL,
+    customer_id NUMBER(10) NOT NULL,
+    claim_type VARCHAR(50),
+    claim_status VARCHAR(20) DEFAULT 'SUBMITTED',
+    incident_date DATE,
+    reported_date DATE,
+    claim_amount NUMBER(12,2),
+    approved_amount NUMBER(12,2),
+    deductible_amount NUMBER(10,2),
+    adjuster_id NUMBER(10),
+    incident_description TEXT,
+    incident_location VARCHAR(200),
+    police_report_number VARCHAR(50),
+    settlement_date DATE,
+    payment_date DATE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- 7. PREMIUM_PAYMENTS TABLE
+CREATE OR REPLACE TABLE premium_payments (
+    payment_id NUMBER(12) PRIMARY KEY,
+    policy_id NUMBER(12) NOT NULL,
+    customer_id NUMBER(10) NOT NULL,
+    payment_date DATE,
+    due_date DATE,
+    payment_amount NUMBER(10,2),
+    payment_method VARCHAR(30),
+    payment_status VARCHAR(20) DEFAULT 'PENDING',
+    transaction_id VARCHAR(50),
+    late_fee NUMBER(8,2) DEFAULT 0,
+    payment_period_start DATE,
+    payment_period_end DATE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- 8. UNDERWRITING TABLE
+CREATE OR REPLACE TABLE underwriting (
+    underwriting_id NUMBER(12) PRIMARY KEY,
+    policy_id NUMBER(12) NOT NULL,
+    underwriter_id NUMBER(10),
+    application_date DATE,
+    decision_date DATE,
+    underwriting_status VARCHAR(20),
+    risk_rating VARCHAR(20),
+    medical_exam_required BOOLEAN DEFAULT FALSE,
+    medical_exam_date DATE,
+    credit_check_score NUMBER(3),
+    driving_record_check BOOLEAN DEFAULT FALSE,
+    background_check BOOLEAN DEFAULT FALSE,
+    premium_adjustment_factor NUMBER(5,4) DEFAULT 1.0000,
+    decline_reason VARCHAR(500),
+    special_conditions TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id)
+);
+
+-- 9. BENEFICIARIES TABLE
+CREATE OR REPLACE TABLE beneficiaries (
+    beneficiary_id NUMBER(12) PRIMARY KEY,
+    policy_id NUMBER(12) NOT NULL,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    ssn VARCHAR(11),
+    date_of_birth DATE,
+    relationship VARCHAR(50),
+    percentage NUMBER(5,2),
+    address_line1 VARCHAR(100),
+    address_line2 VARCHAR(100),
+    city VARCHAR(50),
+    state VARCHAR(50),
+    zip_code VARCHAR(10),
+    phone VARCHAR(20),
+    email VARCHAR(100),
+    is_primary BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id)
+);
+
+-- 10. REINSURANCE TABLE
+CREATE OR REPLACE TABLE reinsurance (
+    reinsurance_id NUMBER(12) PRIMARY KEY,
+    policy_id NUMBER(12) NOT NULL,
+    reinsurer_name VARCHAR(100),
+    reinsurance_type VARCHAR(30), -- 'QUOTA_SHARE', 'SURPLUS', 'EXCESS_OF_LOSS'
+    ceded_percentage NUMBER(5,2),
+    retention_amount NUMBER(12,2),
+    reinsurance_premium NUMBER(10,2),
+    contract_start_date DATE,
+    contract_end_date DATE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id)
+);
+
+-- 11. COMMISSION_PAYMENTS TABLE
+CREATE OR REPLACE TABLE commission_payments (
+    commission_id NUMBER(12) PRIMARY KEY,
+    agent_id NUMBER(10) NOT NULL,
+    policy_id NUMBER(12) NOT NULL,
+    commission_type VARCHAR(30), -- 'FIRST_YEAR', 'RENEWAL', 'TRAIL'
+    commission_rate NUMBER(5,4),
+    commission_amount NUMBER(10,2),
+    payment_date DATE,
+    payment_period_start DATE,
+    payment_period_end DATE,
+    payment_status VARCHAR(20) DEFAULT 'PENDING',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id)
+);
+
+-- 12. MEDICAL_RECORDS TABLE
+CREATE OR REPLACE TABLE medical_records (
+    record_id NUMBER(12) PRIMARY KEY,
+    customer_id NUMBER(10) NOT NULL,
+    policy_id NUMBER(12),
+    exam_date DATE,
+    height_inches NUMBER(3),
+    weight_pounds NUMBER(3),
+    blood_pressure_systolic NUMBER(3),
+    blood_pressure_diastolic NUMBER(3),
+    cholesterol_total NUMBER(3),
+    smoking_status VARCHAR(20),
+    alcohol_consumption VARCHAR(30),
+    medical_conditions TEXT,
+    medications TEXT,
+    physician_name VARCHAR(100),
+    physician_license VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id)
+);
+
+-- 13. VEHICLES TABLE (for Auto Insurance)
+CREATE OR REPLACE TABLE vehicles (
+    vehicle_id NUMBER(12) PRIMARY KEY,
+    customer_id NUMBER(10) NOT NULL,
+    vin VARCHAR(17) UNIQUE NOT NULL,
+    year NUMBER(4),
+    make VARCHAR(50),
+    model VARCHAR(50),
+    trim VARCHAR(50),
+    body_style VARCHAR(30),
+    fuel_type VARCHAR(20),
+    transmission VARCHAR(20),
+    mileage NUMBER(7),
+    purchase_date DATE,
+    purchase_price NUMBER(10,2),
+    primary_use VARCHAR(30), -- 'PERSONAL', 'BUSINESS', 'COMMERCIAL'
+    annual_mileage NUMBER(6),
+    garage_location VARCHAR(20), -- 'GARAGE', 'CARPORT', 'STREET'
+    anti_theft_devices VARCHAR(100),
+    safety_features VARCHAR(200),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- 14. PROPERTIES TABLE (for Home Insurance)
+CREATE OR REPLACE TABLE properties (
+    property_id NUMBER(12) PRIMARY KEY,
+    customer_id NUMBER(10) NOT NULL,
+    property_type VARCHAR(30), -- 'SINGLE_FAMILY', 'CONDO', 'TOWNHOUSE', 'MULTI_FAMILY'
+    address_line1 VARCHAR(100),
+    address_line2 VARCHAR(100),
+    city VARCHAR(50),
+    state VARCHAR(50),
+    zip_code VARCHAR(10),
+    square_footage NUMBER(6),
+    year_built NUMBER(4),
+    construction_type VARCHAR(30),
+    roof_type VARCHAR(30),
+    foundation_type VARCHAR(30),
+    heating_type VARCHAR(30),
+    electrical_system VARCHAR(30),
+    plumbing_system VARCHAR(30),
+    security_system BOOLEAN DEFAULT FALSE,
+    fire_alarm BOOLEAN DEFAULT FALSE,
+    sprinkler_system BOOLEAN DEFAULT FALSE,
+    swimming_pool BOOLEAN DEFAULT FALSE,
+    market_value NUMBER(12,2),
+    replacement_cost NUMBER(12,2),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- 15. CLAIM_ADJUSTERS TABLE
+CREATE OR REPLACE TABLE claim_adjusters (
+    adjuster_id NUMBER(10) PRIMARY KEY,
+    adjuster_code VARCHAR(20) UNIQUE NOT NULL,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    phone VARCHAR(20),
+    license_number VARCHAR(50),
+    license_state VARCHAR(50),
+    specialization VARCHAR(100),
+    territory VARCHAR(100),
+    hire_date DATE,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- 16. POLICY_DOCUMENTS TABLE
+CREATE OR REPLACE TABLE policy_documents (
+    document_id NUMBER(12) PRIMARY KEY,
+    policy_id NUMBER(12) NOT NULL,
+    document_type VARCHAR(50),
+    document_name VARCHAR(200),
+    file_path VARCHAR(500),
+    file_size_bytes NUMBER(12),
+    upload_date DATE,
+    uploaded_by NUMBER(10),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id)
+);
+
+-- 17. LEAD_MANAGEMENT TABLE
+CREATE OR REPLACE TABLE lead_management (
+    lead_id NUMBER(12) PRIMARY KEY,
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    email VARCHAR(100),
+    phone VARCHAR(20),
+    lead_source VARCHAR(50),
+    product_interest VARCHAR(50),
+    lead_status VARCHAR(20) DEFAULT 'NEW',
+    assigned_agent_id NUMBER(10),
+    lead_score NUMBER(3),
+    created_date DATE,
+    last_contact_date DATE,
+    next_follow_up_date DATE,
+    conversion_date DATE,
+    notes TEXT,
+    FOREIGN KEY (assigned_agent_id) REFERENCES agents(agent_id)
+);
+
+-- 18. POLICY_ENDORSEMENTS TABLE
+CREATE OR REPLACE TABLE policy_endorsements (
+    endorsement_id NUMBER(12) PRIMARY KEY,
+    policy_id NUMBER(12) NOT NULL,
+    endorsement_type VARCHAR(50),
+    effective_date DATE,
+    premium_change NUMBER(10,2),
+    coverage_change NUMBER(12,2),
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id)
+);
+
+-- 19. ACTUARIAL_DATA TABLE
+CREATE OR REPLACE TABLE actuarial_data (
+    actuarial_id NUMBER(12) PRIMARY KEY,
+    product_id NUMBER(10) NOT NULL,
+    age_group VARCHAR(20),
+    gender VARCHAR(10),
+    state VARCHAR(50),
+    mortality_rate NUMBER(8,6),
+    morbidity_rate NUMBER(8,6),
+    lapse_rate NUMBER(6,4),
+    expense_ratio NUMBER(6,4),
+    profit_margin NUMBER(6,4),
+    effective_date DATE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+    FOREIGN KEY (product_id) REFERENCES insurance_products(product_id)
+);
+
+-- 20. FRAUD_ALERTS TABLE
+CREATE OR REPLACE TABLE fraud_alerts (
+    alert_id NUMBER(12) PRIMARY KEY,
+    claim_id NUMBER(12),
+    policy_id NUMBER(12),
+    customer_id NUMBER(10),
+    alert_type VARCHAR(50),
+    risk_score NUMBER(3),
+    alert_description TEXT,
+    investigation_status VARCHAR(20) DEFAULT 'PENDING',
+    investigator_id NUMBER(10),
+    created_date DATE,
+    resolved_date DATE,
+    resolution TEXT,
+    FOREIGN KEY (claim_id) REFERENCES claims(claim_id),
+    FOREIGN KEY (policy_id) REFERENCES policies(policy_id),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- =============================================================================
+-- DML (Data Manipulation Language) - Sample Data Insertion
+-- =============================================================================
+
+-- Insert Sample Customers
+INSERT INTO customers VALUES
+(1001, 'John', 'Smith', 'john.smith@email.com', '555-123-4567', '1985-03-15', '123-45-6789', 'M', 'MARRIED', 'Software Engineer', 85000.00, 720, '123 Main St', NULL, 'New York', 'NY', '10001', 'USA', '2020-01-15', 'LOW', TRUE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(1002, 'Sarah', 'Johnson', 'sarah.johnson@email.com', '555-234-5678', '1990-07-22', '234-56-7890', 'F', 'SINGLE', 'Marketing Manager', 65000.00, 680, '456 Oak Ave', 'Apt 2B', 'Los Angeles', 'CA', '90210', 'USA', '2021-03-10', 'MEDIUM', TRUE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(1003, 'Michael', 'Brown', 'michael.brown@email.com', '555-345-6789', '1978-11-08', '345-67-8901', 'M', 'MARRIED', 'Financial Advisor', 95000.00, 750, '789 Pine Rd', NULL, 'Chicago', 'IL', '60601', 'USA', '2019-08-20', 'LOW', TRUE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(1004, 'Emily', 'Davis', 'emily.davis@email.com', '555-456-7890', '1982-12-03', '456-78-9012', 'F', 'MARRIED', 'Nurse', 58000.00, 700, '321 Elm St', NULL, 'Houston', 'TX', '77001', 'USA', '2020-11-05', 'MEDIUM', TRUE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(1005, 'Robert', 'Wilson', 'robert.wilson@email.com', '555-567-8901', '1975-06-18', '567-89-0123', 'M', 'DIVORCED', 'Construction Manager', 72000.00, 650, '654 Maple Dr', NULL, 'Phoenix', 'AZ', '85001', 'USA', '2018-04-12', 'HIGH', TRUE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+
+-- Insert Sample Agents
+INSERT INTO agents VALUES
+(2001, 'AGT001', 'Jennifer', 'Martinez', 'jennifer.martinez@insurance.com', '555-111-2222', '111-22-3333', '1980-04-25', '2015-01-10', 'LIC123456', 'NY', '2025-12-31', 'CAPTIVE', 0.0750, 'Northeast Region', NULL, '100 Business Blvd', NULL, 'New York', 'NY', '10001', TRUE, CURRENT_TIMESTAMP()),
+(2002, 'AGT002', 'David', 'Thompson', 'david.thompson@insurance.com', '555-222-3333', '222-33-4444', '1975-09-12', '2012-03-15', 'LIC234567', 'CA', '2024-06-30', 'INDEPENDENT', 0.0850, 'West Coast Region', 2001, '200 Agent Ave', 'Suite 100', 'Los Angeles', 'CA', '90210', TRUE, CURRENT_TIMESTAMP()),
+(2003, 'AGT003', 'Lisa', 'Anderson', 'lisa.anderson@insurance.com', '555-333-4444', '333-44-5555', '1985-01-30', '2018-07-01', 'LIC345678', 'IL', '2026-03-31', 'CAPTIVE', 0.0700, 'Midwest Region', 2001, '300 Sales St', NULL, 'Chicago', 'IL', '60601', TRUE, CURRENT_TIMESTAMP()),
+(2004, 'AGT004', 'James', 'Taylor', 'james.taylor@insurance.com', '555-444-5555', '444-55-6666', '1983-08-14', '2017-09-20', 'LIC456789', 'TX', '2025-09-30', 'BROKER', 0.0900, 'Southwest Region', 2001, '400 Insurance Way', NULL, 'Houston', 'TX', '77001', TRUE, CURRENT_TIMESTAMP()),
+(2005, 'AGT005', 'Amanda', 'Garcia', 'amanda.garcia@insurance.com', '555-555-6666', '555-66-7777', '1988-05-07', '2020-02-01', 'LIC567890', 'AZ', '2027-01-31', 'INDEPENDENT', 0.0800, 'Southwest Region', 2004, '500 Policy Plaza', NULL, 'Phoenix', 'AZ', '85001', TRUE, CURRENT_TIMESTAMP());
+
+-- Insert Sample Insurance Products
+INSERT INTO insurance_products VALUES
+(3001, 'TERM20', 'Term Life 20 Year', 'LIFE', 'Term Life', '20-year term life insurance with level premiums', 500.00, 50000.00, 2000000.00, 18, 65, 20, TRUE, CURRENT_TIMESTAMP()),
+(3002, 'WHOLE100', 'Whole Life Premium', 'LIFE', 'Whole Life', 'Permanent life insurance with cash value', 1200.00, 100000.00, 5000000.00, 18, 75, NULL, TRUE, CURRENT_TIMESTAMP()),
+(3003, 'AUTO_STD', 'Auto Standard Coverage', 'AUTO', 'Personal Auto', 'Standard auto insurance coverage', 800.00, 15000.00, 500000.00, 16, 80, 1, TRUE, CURRENT_TIMESTAMP()),
+(3004, 'HOME_BASIC', 'Homeowners Basic', 'HOME', 'Property', 'Basic homeowners insurance coverage', 1000.00, 100000.00, 2000000.00, 18, 99, 1, TRUE, CURRENT_TIMESTAMP()),
+(3005, 'HEALTH_PPO', 'Health PPO Plan', 'HEALTH', 'Medical', 'Preferred Provider Organization health plan', 400.00, 1000.00, 10000000.00, 0, 99, 1, TRUE, CURRENT_TIMESTAMP()),
+(3006, 'ANNUITY_FIX', 'Fixed Annuity 5%', 'ANNUITY', 'Fixed', 'Fixed annuity with 5% guaranteed rate', 0.00, 10000.00, 5000000.00, 18, 85, NULL, TRUE, CURRENT_TIMESTAMP());
+
+-- Insert Sample Policies
+INSERT INTO policies VALUES
+(4001, 'POL-LIFE-001001', 1001, 2001, 3001, 'ACTIVE', '2023-01-15', '2023-01-15', '2043-01-15', 500000.00, 245.50, 'MONTHLY', 0.00, 'Jane Smith', 'SPOUSE', '987-65-4321', 'APPROVED', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(4002, 'POL-AUTO-001002', 1002, 2002, 3003, 'ACTIVE', '2023-03-10', '2023-03-10', '2024-03-10', 100000.00, 125.75, 'MONTHLY', 500.00, NULL, NULL, NULL, 'APPROVED', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(4003, 'POL-HOME-001003', 1003, 2003, 3004, 'ACTIVE', '2023-02-20', '2023-02-20', '2024-02-20', 350000.00, 158.33, 'MONTHLY', 1000.00, NULL, NULL, NULL, 'APPROVED', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(4004, 'POL-LIFE-001004', 1004, 2001, 3002, 'ACTIVE', '2023-04-05', '2023-04-05', NULL, 750000.00, 425.00, 'QUARTERLY', 0.00, 'Michael Davis', 'SPOUSE', '678-90-1234', 'APPROVED', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(4005, 'POL-AUTO-001005', 1005, 2004, 3003, 'ACTIVE', '2023-05-12', '2023-05-12', '2024-05-12', 75000.00, 98.50, 'MONTHLY', 750.00, NULL, NULL, NULL, 'APPROVED', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+
+-- Insert Sample Annuities
+INSERT INTO annuities VALUES
+(5001, 'ANN-FIX-001001', 1001, 2005, 'FIXED', 100000.00, 105000.00, 0.0500, '2022-06-15', '2032-06-15', NULL, 'MONTHLY', 0.00, 0.0300, 'ACCUMULATION', 'Jane Smith', 'SPOUSE', CURRENT_TIMESTAMP()),
+(5002, 'ANN-VAR-001003', 1003, 2002, 'VARIABLE', 150000.00, 165000.00, 0.0000, '2021-09-10', '2031-09-10', NULL, 'QUARTERLY', 0.00, 0.0250, 'ACCUMULATION', 'Jennifer Brown', 'SPOUSE', CURRENT_TIMESTAMP()),
+(5003, 'ANN-IMM-001005', 1005, 2004, 'IMMEDIATE', 200000.00, 200000.00, 0.0450, '2023-01-01', '2043-01-01', '2023-01-01', 'MONTHLY', 1250.00, 0.0000, 'PAYOUT', 'Lisa Wilson', 'DAUGHTER', CURRENT_TIMESTAMP());
+
+-- Insert Sample Claims
+INSERT INTO claims VALUES
+(6001, 'CLM-AUTO-001', 4002, 1002, 'AUTO_COLLISION', 'APPROVED', '2023-08-15', '2023-08-16', 4500.00, 4000.00, 500.00, 7001, 'Rear-end collision at intersection', '123 Main St & 1st Ave, Los Angeles, CA', 'LAPD-2023-08-001', '2023-09-15', '2023-09-20', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(6002, 'CLM-HOME-001', 4003, 1003, 'HOME_WATER_DAMAGE', 'IN_PROGRESS', '2023-09-10', '2023-09-11', 8500.00, NULL, 1000.00, 7002, 'Pipe burst in basement causing water damage', '789 Pine Rd, Chicago, IL', NULL, NULL, NULL, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP()),
+(6003, 'CLM-LIFE-001', 4001, 1001, 'LIFE_DEATH_BENEFIT', 'SUBMITTED', '2023-10-01', '2023-10-02', 500000.00, NULL, 0.00, 7003, 'Death benefit claim', 'New York Presbyterian Hospital', NULL, NULL, NULL, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP());
+
+-- Insert Sample Premium Payments
+INSERT INTO premium_payments VALUES
+(7001, 4001, 1001, '2023-01-15', '2023-01-15', 245.50, 'AUTO_PAY', 'PAID', 'TXN-001-2023-01', 0.00, '2023-01-15', '2023-02-14', CURRENT_TIMESTAMP()),
+(7002, 4001, 1001, '2023-02-15', '2023-02-15', 245.50, 'AUTO_PAY', 'PAID', 'TXN-001-2023-02', 0.00, '2023-02-15', '2023-03-14', CURRENT_TIMESTAMP()),
+(7003, 4002, 1002, '2023-03-10', '2023-03-10', 125.75, 'CREDIT_CARD', 'PAID', 'TXN-002-2023-03', 0.00, '2023-03-10', '2023-04-09', CURRENT_TIMESTAMP()),
+(7004, 4003, 1003, '2023-02-20', '2023-02-20', 158.33, 'CHECK', 'PAID', 'CHK-003-2023-02', 0.00, '2023-02-20', '2023-03-19', CURRENT_TIMESTAMP()),
+(7005, 4005, 1005, '2023-06-12', '2023-06-12', 98.50, 'BANK_TRANSFER', 'LATE', 'TXN-005-2023-06', 15.00, '2023-06-12', '2023-07-11', CURRENT_TIMESTAMP());
+
+-- Insert Sample Claim Adjusters
+INSERT INTO claim_adjusters VALUES
+(7001, 'ADJ001', 'Mark', 'Johnson', 'mark.johnson@adjusters.com', '555-777-8888', 'ADJ123456', 'CA', 'Auto Claims', 'West Coast', '2018-05-15', TRUE, CURRENT_TIMESTAMP()),
+(7002, 'ADJ002', 'Susan', 'Williams', 'susan.williams@adjusters.com', '555-888-9999', 'ADJ234567', 'IL', 'Property Claims', 'Midwest', '2016-09-20', TRUE, CURRENT_TIMESTAMP()),
+(7003, 'ADJ003', 'Paul', 'Rodriguez', 'paul.rodriguez@adjusters.com', '555-999-0000', 'ADJ345678', 'NY', 'Life Claims', 'Northeast', '2019-03-10', TRUE, CURRENT_TIMESTAMP()),
+(7004, 'ADJ004', 'Karen', 'Lee', 'karen.lee@adjusters.com', '555-000-1111', 'ADJ456789', 'TX', 'Health Claims', 'Southwest', '2020-01-25', TRUE, CURRENT_TIMESTAMP());
+
+-- Insert Sample Underwriting Records
+INSERT INTO underwriting VALUES
+(8001, 4001, 9001, '2022-12-15', '2023-01-10', 'APPROVED', 'STANDARD', TRUE, '2022-12-20', 720, TRUE, TRUE, 1.0000, NULL, 'Standard risk profile, excellent health', CURRENT_TIMESTAMP()),
+(8002, 4002, 9002, '2023-02-25', '2023-03-05', 'APPROVED', 'PREFERRED', FALSE, NULL, 680, TRUE, FALSE, 0.9500, NULL, 'Good driving record, minor credit issues', CURRENT_TIMESTAMP()),
+(8003, 4003, 9003, '2023-02-05', '2023-02-15', 'APPROVED', 'STANDARD', FALSE, NULL, 750, FALSE, TRUE, 1.0000, NULL, 'Excellent credit, standard property risk', CURRENT_TIMESTAMP()),
+(8004, 4004, 9001, '2023-03-20', '2023-04-01', 'APPROVED', 'PREFERRED_PLUS', TRUE, '2023-03-25', 700, TRUE, TRUE, 0.8500, NULL, 'Excellent health, non-smoker, preferred rates', CURRENT_TIMESTAMP()),
+(8005, 4005, 9004, '2023-04-28', '2023-05-08', 'APPROVED', 'SUBSTANDARD', FALSE, NULL, 650, TRUE, TRUE, 1.2500, 'Previous claims history', 'Higher risk due to previous claims', CURRENT_TIMESTAMP());
+
+-- Insert Sample Beneficiaries
+INSERT INTO beneficiaries VALUES
+(9001, 4001, 'Jane', 'Smith', '987-65-4321', '1987-06-20', 'SPOUSE', 100.00, '123 Main St', NULL, 'New York', 'NY', '10001', '555-123-4568', 'jane.smith@email.com', TRUE, CURRENT_TIMESTAMP()),
+(9002, 4004, 'Michael', 'Davis', '678-90-1234', '1985-09-15', 'SPOUSE', 75.00, '321 Elm St', NULL, 'Houston', 'TX', '77001', '555-456-7891', 'michael.davis@email.com', TRUE, CURRENT_TIMESTAMP()),
+(9003, 4004, 'Sarah', 'Davis', '789-01-2345', '2010-03-12', 'CHILD', 25.00, '321 Elm St', NULL, 'Houston', 'TX', '77001', NULL, NULL, FALSE, CURRENT_TIMESTAMP());
+
+-- Insert Sample Vehicles
+INSERT INTO vehicles VALUES
+(10001, 1002, '1HGBH41JXMN109186', 2021, 'Honda', 'Accord', 'EX-L', 'Sedan', 'Gasoline', 'Automatic', 15000, '2021-01-15', 28000.00, 'PERSONAL', 12000, 'GARAGE', 'Alarm System, GPS Tracking', 'ABS, Airbags, Backup Camera', CURRENT_TIMESTAMP()),
+(10002, 1005, '1FTFW1ET5DFC10312', 2019, 'Ford', 'F-150', 'XLT', 'Pickup Truck', 'Gasoline', 'Automatic', 45000, '2019-06-20', 35000.00, 'BUSINESS', 20000, 'CARPORT', 'Club Lock', 'ABS, Airbags', CURRENT_TIMESTAMP()),
+(10003, 1003, '5NPE34AF4FH123456', 2020, 'Hyundai', 'Sonata', 'SEL', 'Sedan', 'Gasoline', 'Automatic', 22000, '2020-03-10', 24000.00, 'PERSONAL', 10000, 'GARAGE', 'Factory Alarm', 'ABS, Airbags, Lane Assist', CURRENT_TIMESTAMP());
+
+-- Insert Sample Properties
+INSERT INTO properties VALUES
+(11001, 1003, 'SINGLE_FAMILY', '789 Pine Rd', NULL, 'Chicago', 'IL', '60601', 2200, 1995, 'BRICK', 'ASPHALT_SHINGLE', 'CONCRETE_SLAB', 'CENTRAL_GAS', 'COPPER_200AMP', 'COPPER', TRUE, TRUE, FALSE, FALSE, 420000.00, 380000.00, CURRENT_TIMESTAMP()),
+(11002, 1001, 'CONDO', '123 Main St', 'Unit 5B', 'New York', 'NY', '10001', 1100, 2005, 'CONCRETE', 'BUILT_UP', 'CONCRETE', 'CENTRAL_ELECTRIC', 'COPPER_150AMP', 'COPPER', TRUE, TRUE, TRUE, FALSE, 650000.00, 550000.00, CURRENT_TIMESTAMP()),
+(11003, 1004, 'TOWNHOUSE', '321 Elm St', NULL, 'Houston', 'TX', '77001', 1800, 2010, 'FRAME', 'COMPOSITION_SHINGLE', 'CONCRETE_SLAB', 'CENTRAL_GAS', 'COPPER_200AMP', 'PEX', FALSE, TRUE, FALSE, TRUE, 280000.00, 250000.00, CURRENT_TIMESTAMP());
+
+-- Insert Sample Commission Payments
+INSERT INTO commission_payments VALUES
+(12001, 2001, 4001, 'FIRST_YEAR', 0.0750, 2205.00, '2023-02-15', '2023-01-15', '2024-01-14', 'PAID', CURRENT_TIMESTAMP()),
+(12002, 2002, 4002, 'FIRST_YEAR', 0.0850, 1281.15, '2023-04-10', '2023-03-10', '2024-03-09', 'PAID', CURRENT_TIMESTAMP()),
+(12003, 2003, 4003, 'FIRST_YEAR', 0.0700, 1330.00, '2023-03-20', '2023-02-20', '2024-02-19', 'PAID', CURRENT_TIMESTAMP()),
+(12004, 2001, 4004, 'FIRST_YEAR', 0.0750, 3825.00, '2023-05-05', '2023-04-05', '2024-04-04', 'PAID', CURRENT_TIMESTAMP()),
+(12005, 2004, 4005, 'FIRST_YEAR', 0.0900, 1062.60, '2023-06-12', '2023-05-12', '2024-05-11', 'PAID', CURRENT_TIMESTAMP()),
+(12006, 2001, 4001, 'RENEWAL', 0.0250, 735.00, '2024-02-15', '2024-01-15', '2025-01-14', 'PENDING', CURRENT_TIMESTAMP());
+
+-- Insert Sample Medical Records
+INSERT INTO medical_records VALUES
+(13001, 1001, 4001, '2022-12-20', 70, 180, 125, 80, 195, 'NON_SMOKER', 'OCCASIONAL', 'Hypertension (controlled)', 'Lisinopril 10mg daily', 'Dr. Sarah Wilson', 'MD12345', CURRENT_TIMESTAMP()),
+(13002, 1004, 4004, '2023-03-25', 65, 140, 110, 70, 180, 'NON_SMOKER', 'NONE', 'No significant medical history', 'None', 'Dr. Michael Chen', 'MD23456', CURRENT_TIMESTAMP()),
+(13003, 1002, NULL, '2023-02-28', 66, 155, 118, 75, 210, 'FORMER_SMOKER', 'SOCIAL', 'High cholesterol', 'Atorvastatin 20mg daily', 'Dr. Jennifer Martinez', 'MD34567', CURRENT_TIMESTAMP());
+
+-- Insert Sample Reinsurance
+INSERT INTO reinsurance VALUES
+(14001, 4001, 'Global Re Insurance Ltd', 'QUOTA_SHARE', 25.00, 125000.00, 735.00, '2023-01-01', '2023-12-31', CURRENT_TIMESTAMP()),
+(14002, 4004, 'International Reinsurance Co', 'SURPLUS', 50.00, 250000.00, 2550.00, '2023-01-01', '2023-12-31', CURRENT_TIMESTAMP()),
+(14003, 4003, 'Worldwide Re Corp', 'EXCESS_OF_LOSS', 0.00, 300000.00, 475.00, '2023-01-01', '2023-12-31', CURRENT_TIMESTAMP());
+
+-- Insert Sample Policy Documents
+INSERT INTO policy_documents VALUES
+(15001, 4001, 'POLICY_CONTRACT', 'Term Life Policy Contract - POL-LIFE-001001.pdf', '/documents/policies/2023/POL-LIFE-001001.pdf', 245760, '2023-01-15', 2001, TRUE, CURRENT_TIMESTAMP()),
+(15002, 4001, 'MEDICAL_EXAM', 'Medical Exam Report - Customer 1001.pdf', '/documents/medical/2022/EXAM-1001-20221220.pdf', 156432, '2022-12-21', 2001, TRUE, CURRENT_TIMESTAMP()),
+(15003, 4002, 'POLICY_CONTRACT', 'Auto Policy Contract - POL-AUTO-001002.pdf', '/documents/policies/2023/POL-AUTO-001002.pdf', 189504, '2023-03-10', 2002, TRUE, CURRENT_TIMESTAMP()),
+(15004, 4003, 'PROPERTY_INSPECTION', 'Home Inspection Report - Property 11001.pdf', '/documents/inspections/2023/PROP-11001-20230215.pdf', 524288, '2023-02-15', 2003, TRUE, CURRENT_TIMESTAMP());
+
+-- Insert Sample Lead Management
+INSERT INTO lead_management VALUES
+(16001, 'Jennifer', 'White', 'jennifer.white@email.com', '555-111-3333', 'WEBSITE', 'LIFE_INSURANCE', 'QUALIFIED', 2001, 85, '2023-09-15', '2023-10-01', '2023-10-15', NULL, 'Interested in term life, has young children'),
+(16002, 'Thomas', 'Black', 'thomas.black@email.com', '555-222-4444', 'REFERRAL', 'AUTO_INSURANCE', 'CONTACTED', 2002, 70, '2023-10-01', '2023-10-05', '2023-10-20', NULL, 'Moving to California, needs new auto policy'),
+(16003, 'Maria', 'Green', 'maria.green@email.com', '555-333-5555', 'ADVERTISEMENT', 'ANNUITY', 'NEW', 2005, 65, '2023-10-10', NULL, '2023-10-25', NULL, 'Retirement planning inquiry'),
+(16004, 'Kevin', 'Blue', 'kevin.blue@email.com', '555-444-6666', 'COLD_CALL', 'HOME_INSURANCE', 'CONVERTED', 2003, 90, '2023-08-20', '2023-09-15', NULL, '2023-09-30', 'Successfully converted to homeowner policy'),
+(16005, 'Rachel', 'Gold', 'rachel.gold@email.com', '555-555-7777', 'SOCIAL_MEDIA', 'HEALTH_INSURANCE', 'NURTURING', 2004, 55, '2023-09-25', '2023-10-02', '2023-10-30', NULL, 'Self-employed, looking for health coverage');
+
+-- Insert Sample Policy Endorsements
+INSERT INTO policy_endorsements VALUES
+(17001, 4002, 'COVERAGE_INCREASE', '2023-06-15', 25.00, 25000.00, 'Increased liability coverage from $100K to $125K', CURRENT_TIMESTAMP()),
+(17002, 4003, 'PERSONAL_PROPERTY_RIDER', '2023-07-01', 45.00, 15000.00, 'Added jewelry and electronics rider', CURRENT_TIMESTAMP()),
+(17003, 4001, 'WAIVER_OF_PREMIUM', '2023-04-20', 85.00, 0.00, 'Added waiver of premium benefit for disability', CURRENT_TIMESTAMP()),
+(17004, 4005, 'ROADSIDE_ASSISTANCE', '2023-08-10', 15.00, 0.00, 'Added 24/7 roadside assistance coverage', CURRENT_TIMESTAMP());
+
+-- Insert Sample Actuarial Data
+INSERT INTO actuarial_data VALUES
+(18001, 3001, '25-35', 'M', 'NY', 0.001250, 0.002500, 0.0450, 0.1200, 0.0800, '2023-01-01', CURRENT_TIMESTAMP()),
+(18002, 3001, '25-35', 'F', 'NY', 0.000980, 0.002100, 0.0420, 0.1200, 0.0800, '2023-01-01', CURRENT_TIMESTAMP()),
+(18003, 3001, '36-50', 'M', 'NY', 0.002100, 0.003800, 0.0380, 0.1200, 0.0750, '2023-01-01', CURRENT_TIMESTAMP()),
+(18004, 3002, '25-35', 'M', 'CA', 0.001250, 0.002500, 0.0250, 0.1500, 0.1200, '2023-01-01', CURRENT_TIMESTAMP()),
+(18005, 3003, '25-35', 'M', 'TX', 0.000000, 0.125000, 0.0850, 0.2000, 0.0600, '2023-01-01', CURRENT_TIMESTAMP()),
+(18006, 3004, 'ALL', 'ALL', 'IL', 0.000000, 0.015000, 0.0650, 0.2500, 0.0750, '2023-01-01', CURRENT_TIMESTAMP());
+
+-- Insert Sample Fraud Alerts
+INSERT INTO fraud_alerts VALUES
+(19001, 6001, 4002, 1002, 'SUSPICIOUS_CLAIM_TIMING', 75, 'Policy purchased 2 weeks before claim filed', 'INVESTIGATING', 8001, '2023-08-20', NULL, NULL),
+(19002, NULL, 4005, 1005, 'PAYMENT_IRREGULARITY', 45, 'Multiple failed payment attempts with different cards', 'RESOLVED', 8002, '2023-07-15', '2023-08-01', 'Customer provided valid explanation - card fraud victim'),
+(19003, 6002, 4003, 1003, 'CLAIM_AMOUNT_ANOMALY', 85, 'Claim amount significantly higher than typical for this type', 'PENDING', NULL, '2023-09-15', NULL, NULL);
+
+-- Additional sample data for underwriters (referenced in underwriting table)
+INSERT INTO employees VALUES
+(9001, 'Alice', 'Cooper', 'alice.cooper@insurance.com', '555-100-2001', '100-20-3001', '1982-11-15', '2015-08-10', 'Senior Underwriter', 'Underwriting', NULL, 75000.00, '1000 Corporate Blvd', NULL, 'New York', 'NY', '10001', 'Bob Cooper', '555-100-2002', TRUE, CURRENT_TIMESTAMP()),
+(9002, 'Brian', 'Miller', 'brian.miller@insurance.com', '555-100-2003', '100-20-3003', '1979-05-22', '2012-03-20', 'Underwriting Manager', 'Underwriting', NULL, 85000.00, '2000 Corporate Blvd', NULL, 'Los Angeles', 'CA', '90210', 'Carol Miller', '555-100-2004', TRUE, CURRENT_TIMESTAMP()),
+(9003, 'Catherine', 'Davis', 'catherine.davis@insurance.com', '555-100-2005', '100-20-3005', '1985-09-08', '2018-06-15', 'Property Underwriter', 'Underwriting', 9002, 68000.00, '3000 Corporate Blvd', NULL, 'Chicago', 'IL', '60601', 'David Davis', '555-100-2006', TRUE, CURRENT_TIMESTAMP()),
+(9004, 'Daniel', 'Wilson', 'daniel.wilson@insurance.com', '555-100-2007', '100-20-3007', '1983-12-03', '2017-01-10', 'Auto Underwriter', 'Underwriting', 9002, 65000.00, '4000 Corporate Blvd', NULL, 'Houston', 'TX', '77001', 'Emma Wilson', '555-100-2008', TRUE, CURRENT_TIMESTAMP());
+
+-- Additional sample data for fraud investigators (referenced in fraud_alerts table)
+INSERT INTO employees VALUES
+(8001, 'Frank', 'Jackson', 'frank.jackson@insurance.com', '555-200-3001', '200-30-4001', '1980-07-18', '2016-11-05', 'Fraud Investigator', 'Special Investigations', NULL, 72000.00, '5000 Security Blvd', NULL, 'New York', 'NY', '10001', 'Grace Jackson', '555-200-3002', TRUE, CURRENT_TIMESTAMP()),
+(8002, 'Helen', 'Taylor', 'helen.taylor@insurance.com', '555-200-3003', '200-30-4003', '1978-04-25', '2014-09-12', 'Senior Fraud Investigator', 'Special Investigations', NULL, 78000.00, '6000 Security Blvd', NULL, 'Phoenix', 'AZ', '85001', 'Ian Taylor', '555-200-3004', TRUE, CURRENT_TIMESTAMP());
+
+-- =============================================================================
+-- Additional Useful Queries for POC Testing
+-- =============================================================================
+
+-- Query 1: Customer Portfolio Summary
+/*
+SELECT 
+    c.customer_id,
+    c.first_name || ' ' || c.last_name AS customer_name,
+    COUNT(DISTINCT p.policy_id) AS total_policies,
+    SUM(p.coverage_amount) AS total_coverage,
+    SUM(p.premium_amount) AS total_annual_premium,
+    COUNT(DISTINCT a.annuity_id) AS total_annuities,
+    SUM(a.current_value) AS total_annuity_value
+FROM customers c
+LEFT JOIN policies p ON c.customer_id = p.customer_id AND p.policy_status = 'ACTIVE'
+LEFT JOIN annuities a ON c.customer_id = a.customer_id AND a.contract_status = 'ACTIVE'
+GROUP BY c.customer_id, c.first_name, c.last_name
+ORDER BY total_coverage DESC;
+*/
+
+-- Query 2: Agent Performance Report
+/*
+SELECT 
+    a.agent_id,
+    a.first_name || ' ' || a.last_name AS agent_name,
+    a.territory,
+    COUNT(p.policy_id) AS policies_sold,
+    SUM(p.premium_amount) AS total_premium_volume,
+    AVG(p.premium_amount) AS avg_policy_premium,
+    SUM(cp.commission_amount) AS total_commissions_earned
+FROM agents a
+LEFT JOIN policies p ON a.agent_id = p.agent_id
+LEFT JOIN commission_payments cp ON a.agent_id = cp.agent_id AND cp.payment_status = 'PAID'
+WHERE a.is_active = TRUE
+GROUP BY a.agent_id, a.first_name, a.last_name, a.territory
+ORDER BY total_premium_volume DESC;
+*/
+
+-- Query 3: Claims Analysis
+/*
+SELECT 
+    ip.product_type,
+    COUNT(cl.claim_id) AS total_claims,
+    AVG(cl.claim_amount) AS avg_claim_amount,
+    SUM(cl.approved_amount) AS total_paid_claims,
+    COUNT(CASE WHEN cl.claim_status = 'APPROVED' THEN 1 END) AS approved_claims,
+    ROUND((COUNT(CASE WHEN cl.claim_status = 'APPROVED' THEN 1 END) * 100.0 / COUNT(cl.claim_id)), 2) AS approval_rate_percent
+FROM claims cl
+JOIN policies p ON cl.policy_id = p.policy_id
+JOIN insurance_products ip ON p.product_id = ip.product_id
+GROUP BY ip.product_type
+ORDER BY total_claims DESC;
+*/
+
+-- =============================================================================
+-- Create additional indexes for better performance
+-- =============================================================================
+
+-- Customer indexes
+CREATE INDEX idx_customers_email ON customers(email);
+CREATE INDEX idx_customers_ssn ON customers(ssn);
+CREATE INDEX idx_customers_state ON customers(state);
+
+-- Policy indexes  
+CREATE INDEX idx_policies_customer_id ON policies(customer_id);
+CREATE INDEX idx_policies_agent_id ON policies(agent_id);
+CREATE INDEX idx_policies_status ON policies(policy_status);
+CREATE INDEX idx_policies_effective_date ON policies(effective_date);
+
+-- Claims indexes
+CREATE INDEX idx_claims_policy_id ON claims(policy_id);
+CREATE INDEX idx_claims_status ON claims(claim_status);
+CREATE INDEX idx_claims_incident_date ON claims(incident_date);
+
+-- Premium payment indexes
+CREATE INDEX idx_premium_payments_policy_id ON premium_payments(policy_id);
+CREATE INDEX idx_premium_payments_due_date ON premium_payments(due_date);
+CREATE INDEX idx_premium_payments_status ON premium_payments(payment_status);
+
+-- Agent indexes
+CREATE INDEX idx_agents_territory ON agents(territory);
+CREATE INDEX idx_agents_license_state ON agents(license_state);
+
+-- Commission indexes
+CREATE INDEX idx_commission_agent_id ON commission_payments(agent_id);
+CREATE INDEX idx_commission_payment_date ON commission_payments(payment_date);
+
+-- End of Insurance Industry POC Schema
+
+
+
+-- ========================================
+-- REFERENCE DATA CLASSIFICATION TABLE
+-- Based on the provided classification matrix
+-- Using specified database: DOCAI_DB
+-- ========================================
+
+-- Use the existing database and schema
+create database DOCAI_DB;
+create schema DATA_CATALOG;
+
+USE DATABASE DOCAI_DB;
+USE SCHEMA DATA_CATALOG;
+
+-- Create comprehensive reference table for data classification
+CREATE OR REPLACE TABLE DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE (
+    data_element VARCHAR(500) NOT NULL,
+    public BOOLEAN DEFAULT FALSE,
+    internal_use BOOLEAN DEFAULT FALSE,
+    confidential BOOLEAN DEFAULT FALSE,
+    restricted BOOLEAN DEFAULT FALSE,
+    primary_classification VARCHAR(20),
+    regex_patterns VARIANT,
+    column_keywords VARIANT,
+    compliance_requirements VARIANT,
+    description TEXT,
+    examples TEXT,
+    created_date TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Insert all data elements from the classification matrix using SELECT statements
+INSERT INTO DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE 
+(data_element, public, internal_use, confidential, restricted, primary_classification, regex_patterns, column_keywords, compliance_requirements, description, examples)
+
+SELECT 'Social Security Number (SSN) / Tax ID Number', FALSE, FALSE, FALSE, TRUE, 'RESTRICTED', 
+       PARSE_JSON('["\\\\b\\\\d{3}-\\\\d{2}-\\\\d{4}\\\\b", "\\\\b\\\\d{9}\\\\b"]'), 
+       PARSE_JSON('["ssn", "social_security", "tax_id", "social_sec_num", "taxid"]'),
+       PARSE_JSON('["GDPR", "CCPA", "SOX", "Privacy Act"]'),
+       'Government-issued unique identifier for tax and social security purposes',
+       '123-45-6789, 123456789'
+
+UNION ALL SELECT 'Government-Issued Identification', FALSE, FALSE, FALSE, TRUE, 'RESTRICTED',
+       PARSE_JSON('["\\\\b[A-Z]\\\\d{8}\\\\b", "\\\\b\\\\d{8,12}\\\\b", "\\\\b[A-Z]{1,2}\\\\d{6,8}\\\\b"]'),
+       PARSE_JSON('["license", "passport", "government_id", "driver_license", "passport_num", "military_id", "state_id"]'),
+       PARSE_JSON('["GDPR", "Privacy Act", "REAL ID Act"]'),
+       'Driver license, passport, military ID, state ID, etc.',
+       'DL-A1234567, P123456789, ID-12345678'
+
+UNION ALL SELECT 'Bank Account or Debit/Credit Card Number and Security Code', FALSE, FALSE, FALSE, TRUE, 'RESTRICTED',
+       PARSE_JSON('["\\\\b\\\\d{4}[-\\\\s]?\\\\d{4}[-\\\\s]?\\\\d{4}[-\\\\s]?\\\\d{4}\\\\b", "\\\\b\\\\d{10,17}\\\\b", "\\\\b\\\\d{3,4}\\\\b"]'),
+       PARSE_JSON('["credit_card", "cc_num", "card_number", "bank_account", "account_num", "routing", "cvv", "cvc", "security_code"]'),
+       PARSE_JSON('["PCI DSS", "SOX", "GDPR"]'),
+       'Financial account numbers and security codes',
+       '4532-1234-5678-9012, 1234567890123456, 123'
+
+UNION ALL SELECT 'Medical/Health Data', FALSE, FALSE, FALSE, TRUE, 'RESTRICTED',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["medical", "health", "diagnosis", "prescription", "patient", "hipaa", "healthcare", "treatment"]'),
+       PARSE_JSON('["HIPAA", "GDPR", "HITECH"]'),
+       'Any medical or health-related information',
+       'Diagnosis, prescription, medical history'
+
+UNION ALL SELECT 'Biometric Information', FALSE, FALSE, FALSE, TRUE, 'RESTRICTED',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["fingerprint", "retina", "biometric", "facial_rec", "iris", "dna", "genetic"]'),
+       PARSE_JSON('["BIPA", "GDPR", "CCPA"]'),
+       'Fingerprints, retina scans, facial recognition data, DNA',
+       'Fingerprint hash, facial recognition vector'
+
+UNION ALL SELECT 'Account Name', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('["\\\\b[A-Z0-9]{6,20}\\\\b"]'),
+       PARSE_JSON('["account", "account_name", "customer_account"]'),
+       PARSE_JSON('["Internal Policy"]'),
+       'Customer or business account identifiers',
+       'ACC-123456, CUSTOMER-ABC123'
+
+UNION ALL SELECT 'Any policy, contract, or account number', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('["\\\\b[A-Z0-9]{6,20}\\\\b", "\\\\b\\\\d{8,15}\\\\b"]'),
+       PARSE_JSON('["policy", "contract", "account_number", "policy_num", "contract_id"]'),
+       PARSE_JSON('["Internal Policy", "SOX"]'),
+       'Policy numbers, contract identifiers, account numbers',
+       'POL-123456, CONTRACT-789012'
+
+UNION ALL SELECT 'Password', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["password", "pwd", "pass", "secret", "auth", "credential"]'),
+       PARSE_JSON('["Security Policy", "ISO 27001"]'),
+       'Authentication credentials and passwords',
+       '[ENCRYPTED/HASHED]'
+
+UNION ALL SELECT 'Security Question Answer', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["security_question", "secret_answer", "challenge_answer"]'),
+       PARSE_JSON('["Security Policy", "GDPR"]'),
+       'Answers to security challenge questions',
+       'Mother maiden name, first pet name'
+
+UNION ALL SELECT 'Date of Birth', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('["\\\\b(19|20)\\\\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\\\d|3[01])\\\\b", "\\\\b\\\\d{1,2}/\\\\d{1,2}/\\\\d{4}\\\\b"]'),
+       PARSE_JSON('["dob", "birth_date", "birthdate", "date_of_birth", "birthday"]'),
+       PARSE_JSON('["GDPR", "CCPA", "HIPAA"]'),
+       'Date when individual was born',
+       '1985-03-15, 03/15/1985'
+
+UNION ALL SELECT 'Signature', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["signature", "sign", "digital_sign", "esignature"]'),
+       PARSE_JSON('["ESIGN Act", "GDPR"]'),
+       'Physical or digital signatures',
+       'Digital signature file, signature image'
+
+UNION ALL SELECT 'Age', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('["\\\\b\\\\d{1,3}\\\\b"]'),
+       PARSE_JSON('["age", "years_old", "age_years", "birth_year"]'),
+       PARSE_JSON('["GDPR", "CCPA"]'),
+       'Person age in years',
+       '25, 45, 67'
+
+UNION ALL SELECT 'Salary/Benefit Information', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('["\\\\$[\\\\d,]+", "\\\\b\\\\d+\\\\.\\\\d{2}\\\\b"]'),
+       PARSE_JSON('["salary", "wage", "compensation", "pay", "income", "benefit", "bonus"]'),
+       PARSE_JSON('["Internal Policy", "SOX"]'),
+       'Employee compensation and benefits',
+       '$75,000.00, $5,200.50'
+
+UNION ALL SELECT 'Employees Files', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["employee_file", "personnel", "hr_record", "staff_file"]'),
+       PARSE_JSON('["Internal Policy", "GDPR"]'),
+       'Employee personnel records and files',
+       'Performance review, disciplinary action'
+
+UNION ALL SELECT 'Client Internet/Electronic Activity', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('["\\\\b\\\\d{1,3}\\\\.\\\\d{1,3}\\\\.\\\\d{1,3}\\\\.\\\\d{1,3}\\\\b"]'),
+       PARSE_JSON('["ip_address", "internet_activity", "web_activity", "browsing", "cookies", "geolocation"]'),
+       PARSE_JSON('["GDPR", "CCPA", "COPPA"]'),
+       'Online activity, IP addresses, cookies, geolocation data',
+       '192.168.1.1, website visits, location data'
+
+UNION ALL SELECT 'Financial/Credit Reports', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["financial", "credit_report", "banking", "credit_score", "financial_history"]'),
+       PARSE_JSON('["FCRA", "GDPR", "SOX"]'),
+       'Credit reports and financial assessments',
+       'Credit score: 750, financial analysis'
+
+UNION ALL SELECT 'Disability (Physical or Mental)', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["disability", "handicap", "medical_condition", "accommodation", "ada"]'),
+       PARSE_JSON('["ADA", "HIPAA", "GDPR"]'),
+       'Information about physical or mental disabilities',
+       'Wheelchair accessible, hearing impaired'
+
+UNION ALL SELECT 'Citizenship Status, National Origin, or DNA/Genetic Information', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["citizenship", "nationality", "origin", "dna", "genetic", "ethnicity", "country_origin"]'),
+       PARSE_JSON('["GINA", "GDPR", "Immigration Law"]'),
+       'Citizenship status, country of origin, genetic data',
+       'US Citizen, Country: Mexico, Genetic marker'
+
+UNION ALL SELECT 'Physical Characteristics or Description', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["height", "weight", "physical", "appearance", "hair_color", "eye_color"]'),
+       PARSE_JSON('["GDPR", "Privacy Act"]'),
+       'Physical appearance and characteristics',
+       'Height: 5-8, Weight: 160lbs, Brown hair'
+
+UNION ALL SELECT 'Race, Color, Religion, Marital Status, or Sexual Orientation', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["race", "color", "religion", "marital", "sexual_orientation", "ethnicity", "faith"]'),
+       PARSE_JSON('["GDPR", "Civil Rights Act", "EEOC"]'),
+       'Protected personal characteristics',
+       'Married, Catholic, Asian-American'
+
+UNION ALL SELECT 'Political Activities or Affiliations', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["political", "party", "affiliation", "voting", "political_party", "campaign"]'),
+       PARSE_JSON('["GDPR", "First Amendment"]'),
+       'Political party membership, voting records, affiliations',
+       'Democratic Party, Campaign donor'
+
+UNION ALL SELECT 'Military or Veteran Status', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["military", "veteran", "service", "armed_forces", "discharge", "rank"]'),
+       PARSE_JSON('["USERRA", "GDPR", "Privacy Act"]'),
+       'Military service history and veteran status',
+       'Army Veteran, Honorable discharge, Rank: Sergeant'
+
+UNION ALL SELECT 'Victim of Domestic Violence, Assault, or Stalking', FALSE, FALSE, TRUE, FALSE, 'CONFIDENTIAL',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["violence", "assault", "stalking", "victim", "domestic_violence", "abuse"]'),
+       PARSE_JSON('["VAWA", "GDPR", "Privacy Act"]'),
+       'Information about victimization status',
+       'Restraining order, victim services'
+
+UNION ALL SELECT 'Phone Number or Fax Number', FALSE, TRUE, FALSE, FALSE, 'INTERNAL_USE',
+       PARSE_JSON('["\\\\b\\\\d{3}[-.]?\\\\d{3}[-.]?\\\\d{4}\\\\b", "\\\\+\\\\d{1,3}[-.\s]?\\\\d{3}[-.\s]?\\\\d{3}[-.\s]?\\\\d{4}\\\\b"]'),
+       PARSE_JSON('["phone", "tel", "mobile", "fax", "telephone", "cell_phone"]'),
+       PARSE_JSON('["GDPR", "CCPA", "TCPA"]'),
+       'Telephone and fax numbers',
+       '555-123-4567, +1-555-123-4567'
+
+UNION ALL SELECT 'Address (Home/Postal)', FALSE, TRUE, FALSE, FALSE, 'INTERNAL_USE',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["address", "street", "home", "postal", "zip", "city", "state", "country"]'),
+       PARSE_JSON('["GDPR", "CCPA"]'),
+       'Physical mailing addresses',
+       '123 Main St, Anytown, CA 12345'
+
+UNION ALL SELECT 'Email Address', FALSE, TRUE, FALSE, FALSE, 'INTERNAL_USE',
+       PARSE_JSON('["\\\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\\\.[A-Z|a-z]{2,}\\\\b"]'),
+       PARSE_JSON('["email", "mail", "e_mail", "email_address"]'),
+       PARSE_JSON('["GDPR", "CCPA", "CAN-SPAM"]'),
+       'Electronic mail addresses',
+       'john.doe@company.com'
+
+UNION ALL SELECT 'Gender/Sex Identity', FALSE, TRUE, FALSE, FALSE, 'INTERNAL_USE',
+       PARSE_JSON('["\\\\b(M|F|Male|Female|Other|Non-binary)\\\\b"]'),
+       PARSE_JSON('["gender", "sex", "male", "female", "gender_identity"]'),
+       PARSE_JSON('["GDPR", "CCPA", "EEOC"]'),
+       'Gender identification information',
+       'Male, Female, Non-binary'
+
+UNION ALL SELECT 'Employment Information', FALSE, TRUE, FALSE, FALSE, 'INTERNAL_USE',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["employer", "job", "position", "work", "employment", "job_title", "company"]'),
+       PARSE_JSON('["EEOC", "GDPR"]'),
+       'Current and past employment details',
+       'Software Engineer, ABC Company, Manager'
+
+UNION ALL SELECT 'Education Information', FALSE, TRUE, FALSE, FALSE, 'INTERNAL_USE',
+       PARSE_JSON('[".*"]'),
+       PARSE_JSON('["education", "school", "degree", "university", "college", "diploma"]'),
+       PARSE_JSON('["FERPA", "GDPR"]'),
+       'Educational background and qualifications',
+       'Bachelor Degree, Harvard University, MBA'
+
+
+
+ 
+
+-- PUBLIC DATA ELEMENTS
+UNION ALL SELECT 'First & Last Name (real or alias)', TRUE, FALSE, FALSE, FALSE, 'PUBLIC',
+ ['\\b[A-Za-z]+\\s+[A-Za-z]+\\b'],
+ ['name', 'first_name', 'last_name', 'full_name', 'customer_name', 'alias'],
+ ['None'],
+ 'Personal names and aliases',
+ 'John Smith, Jane Doe, J. Public';
+
+-- Create a view for easy querying by classification level
+CREATE OR REPLACE VIEW DOCAI_DB.DATA_CATALOG.V_CLASSIFICATION_BY_LEVEL AS
+SELECT 
+    CASE 
+        WHEN restricted THEN 'RESTRICTED'
+        WHEN confidential THEN 'CONFIDENTIAL'
+        WHEN internal_use THEN 'INTERNAL_USE'
+        WHEN public THEN 'PUBLIC'
+    END as classification_level,
+    data_element,
+    regex_patterns,
+    column_keywords,
+    compliance_requirements,
+    description,
+    examples
+FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE
+ORDER BY 
+    CASE 
+        WHEN restricted THEN 1
+        WHEN confidential THEN 2
+        WHEN internal_use THEN 3
+        WHEN public THEN 4
+    END,
+    data_element;
+
+-- Create procedure to get classification rules for the PII scanner
+CREATE OR REPLACE PROCEDURE DOCAI_DB.DATA_CATALOG.GET_CLASSIFICATION_RULES()
+RETURNS VARIANT
+LANGUAGE SQL
+AS
+
+DECLARE
+    rules_json VARIANT;
+BEGIN
+    SELECT OBJECT_CONSTRUCT(
+        'RESTRICTED', ARRAY_AGG(
+            CASE WHEN restricted THEN 
+                OBJECT_CONSTRUCT(
+                    'data_element', data_element,
+                    'regex_patterns', regex_patterns,
+                    'column_keywords', column_keywords,
+                    'compliance_requirements', compliance_requirements,
+                    'description', description,
+                    'examples', examples
+                )
+            END
+        ) WITHIN GROUP (ORDER BY data_element),
+        'CONFIDENTIAL', ARRAY_AGG(
+            CASE WHEN confidential THEN 
+                OBJECT_CONSTRUCT(
+                    'data_element', data_element,
+                    'regex_patterns', regex_patterns,
+                    'column_keywords', column_keywords,
+                    'compliance_requirements', compliance_requirements,
+                    'description', description,
+                    'examples', examples
+                )
+            END
+        ) WITHIN GROUP (ORDER BY data_element),
+        'INTERNAL_USE', ARRAY_AGG(
+            CASE WHEN internal_use THEN 
+                OBJECT_CONSTRUCT(
+                    'data_element', data_element,
+                    'regex_patterns', regex_patterns,
+                    'column_keywords', column_keywords,
+                    'compliance_requirements', compliance_requirements,
+                    'description', description,
+                    'examples', examples
+                )
+            END
+        ) WITHIN GROUP (ORDER BY data_element),
+        'PUBLIC', ARRAY_AGG(
+            CASE WHEN public THEN 
+                OBJECT_CONSTRUCT(
+                    'data_element', data_element,
+                    'regex_patterns', regex_patterns,
+                    'column_keywords', column_keywords,
+                    'compliance_requirements', compliance_requirements,
+                    'description', description,
+                    'examples', examples
+                )
+            END
+        ) WITHIN GROUP (ORDER BY data_element)
+    ) INTO rules_json
+    FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE;
+    
+    RETURN rules_json;
+END;
+;
+
+-- Create function to lookup classification for specific data element
+CREATE OR REPLACE FUNCTION DOCAI_DB.DATA_CATALOG.CLASSIFY_DATA_ELEMENT(element_name STRING)
+RETURNS VARIANT
+LANGUAGE SQL
+AS
+$$
+    SELECT TO_VARIANT(OBJECT_CONSTRUCT(
+        'classification_level', 
+        CASE 
+            WHEN restricted THEN 'RESTRICTED'
+            WHEN confidential THEN 'CONFIDENTIAL'
+            WHEN internal_use THEN 'INTERNAL_USE'
+            WHEN public THEN 'PUBLIC'
+        END,
+        'data_element', data_element,
+        'compliance_requirements', compliance_requirements,
+        'description', description,
+        'examples', examples
+    ))
+    FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE
+    WHERE UPPER(data_element) LIKE UPPER('%' || element_name || '%')
+    ORDER BY 
+        CASE 
+            WHEN restricted THEN 1
+            WHEN confidential THEN 2
+            WHEN internal_use THEN 3
+            WHEN public THEN 4
+        END
+    LIMIT 1
+$$;
+
+-- Create summary report view
+CREATE OR REPLACE VIEW DOCAI_DB.DATA_CATALOG.V_CLASSIFICATION_SUMMARY AS
+SELECT 
+    'RESTRICTED' as classification_level,
+    COUNT(*) as data_elements_count,
+    'Highly sensitive data requiring maximum security controls' as description
+FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE 
+WHERE restricted = TRUE
+
+UNION ALL
+
+SELECT 
+    'CONFIDENTIAL' as classification_level,
+    COUNT(*) as data_elements_count,
+    'Sensitive business information requiring access controls' as description
+FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE 
+WHERE confidential = TRUE
+
+UNION ALL
+
+SELECT 
+    'INTERNAL_USE' as classification_level,
+    COUNT(*) as data_elements_count,
+    'Internal company data with basic access controls' as description
+FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE 
+WHERE internal_use = TRUE
+
+UNION ALL
+
+SELECT 
+    'PUBLIC' as classification_level,
+    COUNT(*) as data_elements_count,
+    'Information safe for public disclosure' as description
+FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE 
+WHERE public = TRUE;
+
+-- Grant permissions (adjust roles as needed)
+GRANT USAGE ON DATABASE DOCAI_DB TO PUBLIC;
+GRANT USAGE ON SCHEMA DOCAI_DB.DATA_CATALOG TO PUBLIC;
+GRANT SELECT ON ALL TABLES IN SCHEMA DOCAI_DB.DATA_CATALOG TO PUBLIC;
+GRANT SELECT ON ALL VIEWS IN SCHEMA DOCAI_DB.DATA_CATALOG TO PUBLIC;
+GRANT USAGE ON ALL PROCEDURES IN SCHEMA DOCAI_DB.DATA_CATALOG TO PUBLIC;
+GRANT USAGE ON ALL FUNCTIONS IN SCHEMA DOCAI_DB.DATA_CATALOG TO PUBLIC;
+
+-- Test the reference system
+SELECT 'PII Reference Classification System Deployed Successfully!' as STATUS,
+       COUNT(*) as TOTAL_DATA_ELEMENTS_DEFINED
+FROM DOCAI_DB.DATA_CATALOG.DATA_CLASSIFICATION_REFERENCE;
+
+-- Show summary by classification level
+SELECT * FROM DOCAI_DB.DATA_CATALOG.V_CLASSIFICATION_SUMMARY;
+
+DROP WAREHOUSE  IF EXISTS  compute_wh1;
+
+-- Example usage queries:
+-- SELECT * FROM DOCAI_DB.DATA_CATALOG.V_CLASSIFICATION_BY_LEVEL WHERE classification_level = 'RESTRICTED';
+-- SELECT DOCAI_DB.DATA_CATALOG.CLASSIFY_DATA_ELEMENT('social security');
+-- CALL DOCAI_DB.DATA_CATALOG.GET_CLASSIFICATION_RULES();
