@@ -1,3 +1,318 @@
+-- ============================================
+-- Fix for AI_MODEL_USED Column Missing Error
+-- ============================================
+-- Run this script to add the missing column to your existing CDE_SCAN_RESULTS table
+
+-- Add AI_MODEL_USED column if it doesn't exist
+ALTER TABLE CDE_SCAN_RESULTS 
+ADD COLUMN AI_MODEL_USED VARCHAR(100);
+
+-- Verify the column was added
+DESC TABLE CDE_SCAN_RESULTS;
+
+-- Optional: Update existing records to show they didn't track the model
+UPDATE CDE_SCAN_RESULTS 
+SET AI_MODEL_USED = 'Not Tracked'
+WHERE AI_MODEL_USED IS NULL AND AI_VALIDATED = TRUE;
+
+-- Verify update
+SELECT COUNT(*), AI_MODEL_USED 
+FROM CDE_SCAN_RESULTS 
+GROUP BY AI_MODEL_USED;
+
+SELECT '✅ Column AI_MODEL_USED added successfully!' AS STATUS;
+
+# QUICK FIX GUIDE - CDE App Errors
+
+## Problem 1: AI_MODEL_USED Column Missing ❌
+**Error**: `SQL compilation error: invalid identifier 'AI_MODEL_USED'`
+
+## Problem 2: Model Not Authorized ❌  
+**Error**: `model doesn't exist or is not authorised`
+
+---
+
+## SOLUTION 1: Add Missing Column (Run This First!)
+
+### Step 1: Execute This SQL in Snowflake
+
+```sql
+-- Add the missing AI_MODEL_USED column
+ALTER TABLE CDE_SCAN_RESULTS 
+ADD COLUMN IF NOT EXISTS AI_MODEL_USED VARCHAR(100);
+
+-- Verify it was added
+DESC TABLE CDE_SCAN_RESULTS;
+
+-- You should see AI_MODEL_USED in the list now
+SELECT 'Column added successfully!' AS STATUS;
+```
+
+### Step 2: Make INSERT Statement Conditional
+
+Find this section in your code (around line 3800-3900 in the scan results saving part):
+
+**BEFORE (Causes Error):**
+```python
+insert_query = f"""
+INSERT INTO CDE_SCAN_RESULTS (
+    SCAN_RUN_ID, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, DATA_TYPE,
+    MATCHED_CDE_ID, MATCHED_DOMAIN, MATCHED_TAG, MATCHED_ATTRIBUTE_LOGICAL_NAME,
+    MATCHED_IS_PII, MATCHED_DEFINITION, PATTERN_ID, PATTERN_TYPE, PATTERN_VALUE,
+    MATCH_SCORE, MATCH_REASON, MATCH_METHOD, AI_VALIDATED, AI_MODEL_USED
+) VALUES (
+    ..., '{match['AI_MODEL_USED']}'
+)
+"""
+```
+
+**AFTER (Fixed):**
+```python
+# Check if AI_MODEL_USED column exists (add this function at the top)
+@st.cache_data(ttl=3600)
+def has_ai_model_column():
+    try:
+        desc = session.sql("DESC TABLE CDE_SCAN_RESULTS").to_pandas()
+        return 'AI_MODEL_USED' in desc['name'].str.upper().tolist()
+    except:
+        return False
+
+# Then in your INSERT statement:
+has_column = has_ai_model_column()
+
+if has_column:
+    # Include AI_MODEL_USED
+    insert_query = f"""
+    INSERT INTO CDE_SCAN_RESULTS (
+        SCAN_RUN_ID, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, DATA_TYPE,
+        MATCHED_CDE_ID, MATCHED_DOMAIN, MATCHED_TAG, MATCHED_ATTRIBUTE_LOGICAL_NAME,
+        MATCHED_IS_PII, MATCHED_DEFINITION, PATTERN_ID, PATTERN_TYPE, PATTERN_VALUE,
+        MATCH_SCORE, MATCH_REASON, MATCH_METHOD, AI_VALIDATED, AI_MODEL_USED
+    ) VALUES (
+        '{match['SCAN_RUN_ID']}', '{match['DATABASE_NAME']}', '{match['SCHEMA_NAME']}',
+        '{match['TABLE_NAME']}', '{match['COLUMN_NAME']}', '{match['DATA_TYPE']}',
+        {match['MATCHED_CDE_ID']}, '{match['MATCHED_DOMAIN']}', '{match['MATCHED_TAG']}',
+        '{match['MATCHED_ATTRIBUTE_LOGICAL_NAME']}', '{match['MATCHED_IS_PII']}', '{def_clean}',
+        {match['PATTERN_ID'] if match['PATTERN_ID'] else 'NULL'}, '{match['PATTERN_TYPE']}',
+        '{match['PATTERN_VALUE']}', {match['MATCH_SCORE']}, '{reason_clean}',
+        '{match['MATCH_METHOD']}', {match['AI_VALIDATED']}, '{match.get('AI_MODEL_USED', 'Unknown')}'
+    )
+    """
+else:
+    # Exclude AI_MODEL_USED
+    insert_query = f"""
+    INSERT INTO CDE_SCAN_RESULTS (
+        SCAN_RUN_ID, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, DATA_TYPE,
+        MATCHED_CDE_ID, MATCHED_DOMAIN, MATCHED_TAG, MATCHED_ATTRIBUTE_LOGICAL_NAME,
+        MATCHED_IS_PII, MATCHED_DEFINITION, PATTERN_ID, PATTERN_TYPE, PATTERN_VALUE,
+        MATCH_SCORE, MATCH_REASON, MATCH_METHOD, AI_VALIDATED
+    ) VALUES (
+        '{match['SCAN_RUN_ID']}', '{match['DATABASE_NAME']}', '{match['SCHEMA_NAME']}',
+        '{match['TABLE_NAME']}', '{match['COLUMN_NAME']}', '{match['DATA_TYPE']}',
+        {match['MATCHED_CDE_ID']}, '{match['MATCHED_DOMAIN']}', '{match['MATCHED_TAG']}',
+        '{match['MATCHED_ATTRIBUTE_LOGICAL_NAME']}', '{match['MATCHED_IS_PII']}', '{def_clean}',
+        {match['PATTERN_ID'] if match['PATTERN_ID'] else 'NULL'}, '{match['PATTERN_TYPE']}',
+        '{match['PATTERN_VALUE']}', {match['MATCH_SCORE']}, '{reason_clean}',
+        '{match['MATCH_METHOD']}', {match['AI_VALIDATED']}
+    )
+    """
+```
+
+---
+
+## SOLUTION 2: Fix Model Authorization Issues
+
+### Step 1: Test Which Models Work in Your Account
+
+Add this function to your code:
+
+```python
+def test_available_models():
+    """Test which Cortex models actually work in your account"""
+    
+    # Common models to test
+    models = [
+        'mixtral-8x7b',
+        'mistral-large2',
+        'mistral-7b',
+        'llama3.1-70b',
+        'llama3.1-8b',
+        'snowflake-arctic',
+        'reka-flash',
+        'gemma-7b'
+    ]
+    
+    working_models = []
+    
+    st.write("Testing models in your account...")
+    
+    for model in models:
+        try:
+            # Try a simple completion
+            test_sql = f"""
+            SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                '{model}',
+                'test'
+            ) as response
+            """
+            result = session.sql(test_sql).collect()
+            
+            if result:
+                working_models.append(model)
+                st.success(f"✅ {model} - Available")
+        except Exception as e:
+            error_msg = str(e).lower()
+            if 'does not exist' in error_msg or 'not authorized' in error_msg:
+                st.error(f"❌ {model} - Not authorized")
+            else:
+                st.warning(f"⚠️ {model} - Error: {str(e)[:50]}")
+    
+    return working_models
+```
+
+### Step 2: Use Test Function Before Scan
+
+In the "CDE Scan" page, add a button to test models:
+
+```python
+if st.button("🔍 Test Available Models"):
+    available_models = test_available_models()
+    st.success(f"Found {len(available_models)} working models")
+    st.write("Available models:", available_models)
+```
+
+### Step 3: Better Error Handling in Cortex Calls
+
+Replace your `call_cortex` function with this improved version:
+
+```python
+def call_cortex(prompt, model='mixtral-8x7b'):
+    """Call Cortex AI with better error handling"""
+    try:
+        # Escape single quotes
+        prompt_clean = prompt.replace("'", "''")
+        
+        # Truncate if too long
+        if len(prompt_clean) > 15000:
+            prompt_clean = prompt_clean[:15000]
+        
+        sql = f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            '{model}',
+            '{prompt_clean}'
+        ) as response
+        """
+        
+        result = session.sql(sql).collect()
+        return result[0]['RESPONSE'] if result else ""
+        
+    except Exception as e:
+        error_msg = str(e).lower()
+        
+        # Handle specific errors
+        if 'does not exist' in error_msg:
+            return f"⚠️ Error: Model '{model}' does not exist in your account"
+        elif 'not authorized' in error_msg:
+            return f"⚠️ Error: You are not authorized to use model '{model}'. Please check with your Snowflake admin."
+        elif 'token' in error_msg and 'limit' in error_msg:
+            return f"⚠️ Error: Input too long for model '{model}'"
+        else:
+            return f"⚠️ Error: {str(e)[:100]}"
+```
+
+### Step 4: Safe Model Selection
+
+Update your model dropdown to only show working models:
+
+```python
+# At the top of your file, after session is created
+@st.cache_data(ttl=3600)
+def get_working_models():
+    """Get list of models that actually work"""
+    test_models = ['mixtral-8x7b', 'mistral-7b', 'llama3.1-70b', 'snowflake-arctic']
+    working = []
+    
+    for model in test_models:
+        try:
+            result = session.sql(f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{model}', 'hi') as r").collect()
+            if result:
+                working.append(model)
+        except:
+            pass
+    
+    return working if working else ['mixtral-8x7b']  # Fallback
+
+# Then in your UI:
+available_models = get_working_models()
+
+selected_model = st.selectbox(
+    "Select AI Model",
+    available_models,
+    help=f"Only showing models available in your account ({len(available_models)} found)"
+)
+```
+
+---
+
+## QUICK TEST CHECKLIST
+
+After applying fixes:
+
+- [ ] Run the ALTER TABLE SQL to add AI_MODEL_USED column
+- [ ] Verify column exists: `DESC TABLE CDE_SCAN_RESULTS;`
+- [ ] Test which models work using the test function
+- [ ] Update model dropdown to only show working models
+- [ ] Try a small scan on 1-2 tables
+- [ ] Check that results save without SQL error
+- [ ] Verify AI reasoning works with selected model
+
+---
+
+## RECOMMENDED SAFE MODEL
+
+If you're unsure which model to use, **`mixtral-8x7b`** is usually available in most Snowflake accounts and provides good balance of speed and accuracy.
+
+To test it:
+```sql
+SELECT SNOWFLAKE.CORTEX.COMPLETE('mixtral-8x7b', 'hello') as response;
+```
+
+If that works, you're good to go!
+
+---
+
+## TROUBLESHOOTING
+
+### Error persists after adding column?
+- Refresh your Streamlit app (press R key)
+- Clear Streamlit cache: `st.cache_data.clear()`
+- Restart the Streamlit app completely
+
+### No models work?
+- Check if Cortex is enabled: Contact your Snowflake admin
+- Check your role permissions: `SHOW GRANTS TO ROLE your_role;`
+- Try from a Snowflake worksheet first to verify Cortex access
+
+### Still getting authorization errors?
+Your account might not have access to certain models. This is normal - Snowflake restricts some models by region or account type. Use the models that work in your account.
+
+---
+
+## FILES PROVIDED
+
+1. **fix_add_ai_model_column.sql** - SQL to add missing column
+2. **cde_app_FIXED.py** - Partially updated app with fixes
+3. **This guide** - Quick fixes you can apply to your existing code
+
+Choose the approach that works best for you:
+- **Quick Fix**: Just apply the SQL and code changes from this guide
+- **Full Replace**: Use the cde_app_FIXED.py file (larger refactor)
+
+---
+
+**Good luck! 🚀**
+
+
 import streamlit as st
 import pandas as pd
 import snowflake.snowpark as snowpark
