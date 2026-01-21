@@ -1,0 +1,2611 @@
+import streamlit as st
+import pandas as pd
+import snowflake.snowpark as snowpark
+from snowflake.snowpark import Session
+import snowflake.snowpark.functions as F
+from datetime import datetime
+import re
+import json
+
+# Page configuration
+st.set_page_config(
+    page_title="CDE Management System (AI-Powered)",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        margin-bottom: 1rem;
+    }
+    .ai-badge {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 1rem;
+        font-size: 0.8rem;
+        font-weight: bold;
+    }
+    .intelligent-section {
+        background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+        border-left: 4px solid #667eea;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .pattern-section {
+        background: linear-gradient(135deg, #f093fb15 0%, #f5576c15 100%);
+        border-left: 4px solid #f093fb;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .success-ai {
+        background: linear-gradient(135deg, #11998e15 0%, #38ef7d15 100%);
+        border-left: 4px solid #11998e;
+        padding: 1rem;
+        border-radius: 0.5rem;
+    }
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #1f77b4;
+    }
+    .model-info {
+        background: linear-gradient(135deg, #ffecd215 0%, #fcb69f15 100%);
+        border-left: 4px solid #fcb69f;
+        padding: 0.5rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+        font-size: 0.85rem;
+    }
+    .model-status {
+        padding: 0.2rem 0.5rem;
+        border-radius: 0.3rem;
+        font-size: 0.75rem;
+        margin-left: 0.5rem;
+    }
+    .model-available {
+        background-color: #d4edda;
+        color: #155724;
+    }
+    .model-unavailable {
+        background-color: #f8d7da;
+        color: #721c24;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Get Snowflake session
+@st.cache_resource
+def get_session():
+    return snowpark.context.get_active_session()
+
+try:
+    session = get_session()
+except:
+    st.error("❌ Unable to connect to Snowflake session.")
+    st.stop()
+
+# ========================================================================
+# DYNAMIC MODEL FETCHING - Gets ONLY available Cortex models from your account
+# ========================================================================
+
+# All known Cortex models to test
+ALL_KNOWN_MODELS = [
+    # Claude models (Anthropic)
+    'claude-3-5-sonnet-20250514',
+    'claude-3-5-haiku-20250514',
+    'claude-3-5-sonnet-20241022',
+    'claude-3-haiku-20240307',
+    'claude-3-sonnet-20240229',
+    'claude-3-opus-20240229',
+    
+    # Snowflake models
+    'snowflake-arctic',
+    
+    # Reka models
+    'reka-core',
+    'reka-flash',
+    
+    # Mistral models
+    'mistral-large',
+    'mistral-large2',
+    'mistral-7b',
+    'mixtral-8x7b',
+    'mixtral-8x22b',
+    
+    # Meta Llama models
+    'llama3-8b',
+    'llama3-70b',
+    'llama3.1-8b',
+    'llama3.1-70b',
+    'llama3.1-405b',
+    'llama3.2-1b',
+    'llama3.2-3b',
+    'llama3.3-70b',
+    
+    # Google models
+    'gemma-7b',
+    'gemma2-9b',
+    
+    # AI21 Labs models
+    'jamba-instruct',
+    'jamba-1.5-mini',
+    'jamba-1.5-large',
+]
+
+def test_single_model(model_name):
+    """
+    Test if a single model is available by making a minimal API call.
+    Returns True if available, False otherwise.
+    """
+    try:
+        # Use a minimal prompt to test availability
+        test_sql = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{model_name}', 'hi') as response"
+        session.sql(test_sql).collect()
+        return True
+    except Exception as e:
+        # Model is not available
+        return False
+
+@st.cache_data(ttl=3600, show_spinner=False)  # Cache for 1 hour
+def get_available_cortex_models(_session_id=None):
+    """
+    Dynamically fetch ONLY available Cortex models in the current Snowflake account.
+    Tests each model individually and returns only those that work.
+    
+    Args:
+        _session_id: Dummy parameter to help with cache invalidation if needed
+    
+    Returns:
+        List of available model names
+    """
+    available_models = []
+    
+    for model_name in ALL_KNOWN_MODELS:
+        if test_single_model(model_name):
+            available_models.append(model_name)
+    
+    # Sort alphabetically for consistent display
+    return sorted(available_models) if available_models else []
+
+def get_available_models_with_status():
+    """
+    Get all known models with their availability status.
+    Useful for displaying which models are available vs unavailable.
+    
+    Returns:
+        Dict with model names as keys and availability (True/False) as values
+    """
+    model_status = {}
+    
+    for model_name in ALL_KNOWN_MODELS:
+        model_status[model_name] = test_single_model(model_name)
+    
+    return model_status
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_available_models_cached():
+    """
+    Cached version that returns available models.
+    Uses session state to avoid repeated testing.
+    """
+    if 'available_models_cache' not in st.session_state:
+        st.session_state.available_models_cache = get_available_cortex_models()
+    return st.session_state.available_models_cache
+
+def refresh_available_models():
+    """
+    Force refresh the available models cache.
+    Call this when user wants to re-check model availability.
+    """
+    # Clear the cache
+    get_available_cortex_models.clear()
+    if 'available_models_cache' in st.session_state:
+        del st.session_state.available_models_cache
+    
+    # Re-fetch
+    return get_available_cortex_models()
+
+# Model information helper
+def get_model_info(model_name):
+    """Return helpful information about each model"""
+    model_descriptions = {
+        'mixtral-8x7b': '⚡ Balanced speed & accuracy - RECOMMENDED',
+        'claude-3-5-sonnet-20250514': '🎯 Most accurate - Best for complex analysis',
+        'claude-3-5-haiku-20250514': '🚀 Fast & efficient - Good for quick tasks',
+        'claude-3-5-sonnet-20241022': '🎯 Claude 3.5 Sonnet - Very accurate',
+        'claude-3-haiku-20240307': '🚀 Claude 3 Haiku - Fast responses',
+        'claude-3-sonnet-20240229': '🎯 Claude 3 Sonnet - Balanced',
+        'claude-3-opus-20240229': '👑 Claude 3 Opus - Most capable',
+        'snowflake-arctic': '❄️ Snowflake optimized - Enterprise ready',
+        'mistral-large2': '🎓 Latest Mistral - Very accurate',
+        'mistral-large': '🎓 Mistral flagship - Very accurate',
+        'mistral-7b': '⚡ Small & fast - Good for simple tasks',
+        'mixtral-8x22b': '🎓 Large Mixtral - High quality',
+        'llama3.1-405b': '🦙 Largest Llama - Maximum capability',
+        'llama3.1-70b': '🦙 Large Llama - Great balance',
+        'llama3.1-8b': '🦙 Small Llama - Fast responses',
+        'llama3.3-70b': '🦙 Latest Llama - Excellent quality',
+        'llama3.2-3b': '🦙 Tiny Llama - Very fast',
+        'llama3.2-1b': '🦙 Micro Llama - Fastest',
+        'llama3-8b': '🦙 Llama 3 Small - Fast',
+        'llama3-70b': '🦙 Llama 3 Large - Capable',
+        'reka-flash': '⚡ Reka fast - Quick responses',
+        'reka-core': '🎯 Reka capable - Good accuracy',
+        'gemma-7b': '🔷 Google Gemma - Solid performance',
+        'gemma2-9b': '🔷 Google Gemma 2 - Improved',
+        'jamba-instruct': '🔶 AI21 Jamba - Instruction tuned',
+        'jamba-1.5-large': '🔶 AI21 Jamba XL - Very capable',
+        'jamba-1.5-mini': '🔶 AI21 Jamba Mini - Fast',
+    }
+    return model_descriptions.get(model_name, '📊 LLM Model')
+
+def get_default_model(available_models):
+    """
+    Get the best default model from available models.
+    Prioritizes models in order of preference.
+    """
+    preferred_order = [
+        'mixtral-8x7b',           # Best balance of speed/quality
+        'mistral-large2',         # Very capable
+        'mistral-large',          # Capable
+        'llama3.1-70b',          # Good alternative
+        'llama3.3-70b',          # Latest Llama
+        'claude-3-5-sonnet-20250514',  # Most capable but may be slow
+        'snowflake-arctic',       # Snowflake native
+        'mistral-7b',            # Fast fallback
+    ]
+    
+    for model in preferred_order:
+        if model in available_models:
+            return model
+    
+    # Return first available if none of preferred are available
+    return available_models[0] if available_models else None
+
+# Cortex Helper Function using SQL
+def call_cortex(prompt, model='mixtral-8x7b'):
+    """Call Cortex AI using SQL function"""
+    try:
+        # Escape single quotes in prompt
+        prompt_clean = prompt.replace("'", "''")
+        
+        sql = f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            '{model}',
+            '{prompt_clean}'
+        ) as response
+        """
+        
+        result = session.sql(sql).collect()
+        return result[0]['RESPONSE'] if result else ""
+    except Exception as e:
+        return f"Error calling Cortex with model {model}: {str(e)}"
+
+# Exclusion Check Function
+def is_excluded_column(column_name):
+    """Check if column should be excluded from CDE scanning"""
+    try:
+        # Try to load exclusion patterns
+        df_exclusions = session.table("CDE_EXCLUSION_PATTERNS").filter(F.col("IS_ACTIVE") == True).to_pandas()
+        
+        column_upper = column_name.upper()
+        
+        for _, exclusion in df_exclusions.iterrows():
+            exclusion_type = exclusion['EXCLUSION_TYPE']
+            exclusion_value = exclusion['EXCLUSION_VALUE'].upper()
+            
+            if exclusion_type == 'EXACT':
+                if column_upper == exclusion_value:
+                    return True, exclusion['EXCLUSION_REASON']
+            
+            elif exclusion_type == 'CONTAINS':
+                if exclusion_value in column_upper:
+                    return True, exclusion['EXCLUSION_REASON']
+            
+            elif exclusion_type == 'STARTS_WITH':
+                if column_upper.startswith(exclusion_value):
+                    return True, exclusion['EXCLUSION_REASON']
+            
+            elif exclusion_type == 'ENDS_WITH':
+                if column_upper.endswith(exclusion_value):
+                    return True, exclusion['EXCLUSION_REASON']
+        
+        return False, None
+        
+    except Exception as e:
+        # If exclusion table doesn't exist, skip exclusion check
+        return False, None
+
+# Smart Exclusion with AI (optional - for edge cases)
+def ai_should_exclude_column(column_name, table_name, data_type, model='mixtral-8x7b'):
+    """Use AI to determine if column is technical/audit (fallback)"""
+    prompt = f"""Is this database column a technical/audit/system column that should be excluded from business data analysis?
+
+Column: {column_name}
+Table: {table_name}
+Type: {data_type}
+
+Common technical columns: created_at, updated_by, record_id, version, etl_batch_id, hash, checksum, etc.
+
+Answer ONLY: YES or NO"""
+    
+    try:
+        result = call_cortex(prompt, model)
+        return 'YES' in result.upper()
+    except:
+        return False
+
+# Cortex AI Functions
+def generate_pattern_suggestions(attribute_name, domain, model='mixtral-8x7b'):
+    """Generate intelligent pattern suggestions using Cortex"""
+    prompt = f"""You are a data governance expert. Given this data element:
+    - Attribute Name: {attribute_name}
+    - Domain: {domain}
+    
+    Generate 8 common database column name variations that might exist in real databases.
+    Consider: abbreviations, prefixes, suffixes, underscores, common aliases.
+    
+    Return ONLY a JSON array of strings (no explanation):
+    ["PATTERN1", "PATTERN2", ...]
+    """
+    
+    try:
+        result = call_cortex(prompt, model)
+        # Extract JSON array from response
+        result = result.strip()
+        if '```' in result:
+            result = result.split('```')[1].replace('json', '').strip()
+        patterns = json.loads(result)
+        return patterns if isinstance(patterns, list) else []
+    except:
+        return []
+
+def generate_definition(attribute_name, domain, tag, model='mixtral-8x7b'):
+    """Generate professional definition using Cortex"""
+    prompt = f"""You are a data dictionary expert. Write a clear, professional definition for:
+    - Attribute: {attribute_name}
+    - Domain: {domain}
+    - Tag: {tag}
+    
+    Requirements:
+    - 2-3 sentences maximum
+    - Professional tone
+    - Include: what it is, why it matters, typical usage
+    - No bullet points
+    
+    Return ONLY the definition text (no labels or formatting).
+    """
+    
+    try:
+        result = call_cortex(prompt, model)
+        return result.strip()
+    except Exception as e:
+        return f"Error generating definition: {str(e)}"
+
+def semantic_column_match(column_name, cde_list, context="", model='mixtral-8x7b'):
+    """Find semantic matches using Cortex with strict validation"""
+    cde_sample = cde_list[:20]  # Limit for token size
+    
+    prompt = f"""You are a STRICT data matching expert. Avoid false positives.
+    
+    Column to match: "{column_name}"
+    Context: {context}
+    
+    Available CDEs:
+    {chr(10).join([f"- {cde}" for cde in cde_sample])}
+    
+    STRICT MATCHING RULES:
+    - Only match if column and CDE have SAME semantic meaning
+    - Generic word overlap is NOT enough (HEATING_TYPE ≠ CLAIM_TYPE)
+    - Domain must match (actuarial ≠ claims)
+    - Context matters (EFFECTIVE_DATE ≠ CLAIM_DATE_OF_LOSS)
+    
+    WRONG matches to avoid:
+    - Different rate types (LAPSE_RATE ≠ COMMISSION_RATE)
+    - Different date types (CONTRACT_DATE ≠ LOSS_DATE)
+    - Different domains (property columns ≠ insurance CDEs)
+    
+    Return ONLY:
+    - The matched CDE name if TRULY similar (confidence > 85%)
+    - "NONE" if no strong match
+    
+    No explanation, just the answer.
+    """
+    
+    try:
+        result = call_cortex(prompt, model)
+        result = result.strip().strip('"').strip("'")
+        return result if result != "NONE" else None
+    except:
+        return None
+
+def generate_intelligent_reasoning(column_name, table_name, matched_cde, definition, data_type, is_pii, model='mixtral-8x7b'):
+    """Generate intelligent match reasoning using Cortex with strict validation"""
+    prompt = f"""You are a strict data governance analyst. Critically evaluate this CDE match:
+    
+    MATCH DETAILS:
+    - Column: {column_name} (Type: {data_type})
+    - Table: {table_name}
+    - Matched CDE: {matched_cde}
+    - Is PII: {is_pii}
+    - Definition: {definition}
+    
+    CRITICAL EVALUATION:
+    First, determine if this is a VALID match or FALSE POSITIVE.
+    
+    FALSE POSITIVE indicators:
+    - Generic words matching (e.g., HEATING_TYPE → CLAIM TYPE is WRONG)
+    - Domain mismatch (e.g., property data → claims domain is WRONG)
+    - Context mismatch (e.g., EFFECTIVE_DATE in actuarial → CLAIM DATE is WRONG)
+    - Similar but different meaning (e.g., LAPSE_RATE → COMMISSION_RATE is WRONG)
+    
+    If FALSE POSITIVE, start with: "⚠️ QUESTIONABLE MATCH"
+    If VALID match, provide:
+    1. Why this is a match (1 sentence)
+    2. Data sensitivity (1 sentence)
+    3. Recommended action (1 sentence)
+    
+    Return single paragraph, professional tone, max 150 words.
+    """
+    
+    try:
+        result = call_cortex(prompt, model)
+        return result.strip()
+    except Exception as e:
+        return f"Standard match based on pattern matching. {definition[:100]}"
+
+def validate_match_quality(column_name, table_name, matched_cde, definition, model='mistral-7b'):
+    """AI validation of match quality"""
+    prompt = f"""You are a data quality validator.
+    
+    MATCH TO VALIDATE:
+    - Column: {column_name} in table {table_name}
+    - Matched CDE: {matched_cde}
+    - CDE Definition: {definition}
+    
+    Is this a TRUE MATCH or FALSE POSITIVE?
+    
+    Consider:
+    - Semantic alignment
+    - Context appropriateness
+    - Definition relevance
+    
+    Return ONLY: TRUE or FALSE (nothing else)
+    """
+    
+    try:
+        result = call_cortex(prompt, model)
+        return 'TRUE' in result.upper()
+    except:
+        return True  # Default to true if AI fails
+
+def ai_classify_column(column_name, table_name, data_type, model='mixtral-8x7b'):
+    """AI-powered column classification"""
+    prompt = f"""You are a data classification expert.
+    
+    Classify this database column:
+    - Column: {column_name}
+    - Table: {table_name}
+    - Data Type: {data_type}
+    
+    Provide:
+    1. Likely Domain (Claims, Coverage, Financial, etc.)
+    2. Likely Tag (Event Details, Financial Metrics, etc.)
+    3. PII Status (Y or N)
+    4. Confidence (0-100)
+    
+    Return as JSON:
+    {{"domain": "...", "tag": "...", "is_pii": "Y/N", "confidence": 85}}
+    """
+    
+    try:
+        result = call_cortex(prompt, model)
+        if '```' in result:
+            result = result.split('```')[1].replace('json', '').strip()
+        classification = json.loads(result)
+        return classification
+    except:
+        return {"domain": "Unknown", "tag": "Unknown", "is_pii": "N", "confidence": 0}
+
+# Helper function to generate unique scan run ID
+def generate_scan_run_id():
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return f"SCAN_{timestamp}"
+
+# ========================================================================
+# SAVE FUNCTIONALITY - Save Reports and Export Features
+# ========================================================================
+
+def create_saved_reports_table():
+    """Create the saved reports table if it doesn't exist"""
+    try:
+        session.sql("""
+            CREATE TABLE IF NOT EXISTS CDE_SAVED_REPORTS (
+                REPORT_ID NUMBER AUTOINCREMENT,
+                REPORT_NAME VARCHAR(500),
+                REPORT_DESCRIPTION TEXT,
+                REPORT_TYPE VARCHAR(50),
+                SCAN_RUN_ID VARCHAR(100),
+                DATABASE_NAME VARCHAR(200),
+                SCHEMA_NAME VARCHAR(200),
+                TOTAL_FINDINGS NUMBER,
+                PII_COUNT NUMBER,
+                AI_MATCH_COUNT NUMBER,
+                PATTERN_MATCH_COUNT NUMBER,
+                TABLES_SCANNED NUMBER,
+                FILTERS_APPLIED TEXT,
+                AI_MODEL_USED VARCHAR(100),
+                CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+                REPORT_STATUS VARCHAR(50) DEFAULT 'ACTIVE',
+                REPORT_DATA VARIANT,
+                SUMMARY_DATA VARIANT,
+                PRIMARY KEY (REPORT_ID)
+            )
+        """).collect()
+        return True
+    except Exception as e:
+        st.error(f"Error creating saved reports table: {str(e)}")
+        return False
+
+def save_report(report_name, report_description, report_type, scan_run_id, 
+                database_name, schema_name, df_results, filters_applied=None, 
+                ai_model_used=None, summary_data=None):
+    """Save a report to the database"""
+    try:
+        # Calculate metrics
+        total_findings = len(df_results)
+        pii_count = len(df_results[df_results['MATCHED_IS_PII'] == 'Y']) if 'MATCHED_IS_PII' in df_results.columns else 0
+        ai_match_count = len(df_results[df_results['MATCH_METHOD'] == 'AI Semantic']) if 'MATCH_METHOD' in df_results.columns else 0
+        pattern_match_count = len(df_results[df_results['MATCH_METHOD'] == 'Pattern']) if 'MATCH_METHOD' in df_results.columns else 0
+        tables_scanned = df_results['TABLE_NAME'].nunique() if 'TABLE_NAME' in df_results.columns else 0
+        
+        # Convert dataframe to JSON for storage
+        report_data_json = df_results.to_json(orient='records', date_format='iso')
+        
+        # Clean strings for SQL
+        report_name_clean = report_name.replace("'", "''")
+        report_description_clean = report_description.replace("'", "''") if report_description else ""
+        filters_json = json.dumps(filters_applied) if filters_applied else "{}"
+        summary_json = json.dumps(summary_data) if summary_data else "{}"
+        
+        insert_query = f"""
+        INSERT INTO CDE_SAVED_REPORTS (
+            REPORT_NAME, REPORT_DESCRIPTION, REPORT_TYPE, SCAN_RUN_ID,
+            DATABASE_NAME, SCHEMA_NAME, TOTAL_FINDINGS, PII_COUNT,
+            AI_MATCH_COUNT, PATTERN_MATCH_COUNT, TABLES_SCANNED,
+            FILTERS_APPLIED, AI_MODEL_USED, REPORT_DATA, SUMMARY_DATA
+        ) VALUES (
+            '{report_name_clean}',
+            '{report_description_clean}',
+            '{report_type}',
+            '{scan_run_id or "N/A"}',
+            '{database_name or "N/A"}',
+            '{schema_name or "N/A"}',
+            {total_findings},
+            {pii_count},
+            {ai_match_count},
+            {pattern_match_count},
+            {tables_scanned},
+            PARSE_JSON('{filters_json}'),
+            '{ai_model_used or "N/A"}',
+            PARSE_JSON('{report_data_json}'),
+            PARSE_JSON('{summary_json}')
+        )
+        """
+        session.sql(insert_query).collect()
+        return True, "Report saved successfully!"
+    except Exception as e:
+        return False, f"Error saving report: {str(e)}"
+
+def get_saved_reports():
+    """Get all saved reports"""
+    try:
+        df = session.sql("""
+            SELECT REPORT_ID, REPORT_NAME, REPORT_DESCRIPTION, REPORT_TYPE,
+                   SCAN_RUN_ID, DATABASE_NAME, SCHEMA_NAME, TOTAL_FINDINGS,
+                   PII_COUNT, AI_MATCH_COUNT, PATTERN_MATCH_COUNT, TABLES_SCANNED,
+                   AI_MODEL_USED, CREATED_DATE, CREATED_BY, REPORT_STATUS
+            FROM CDE_SAVED_REPORTS
+            WHERE REPORT_STATUS = 'ACTIVE'
+            ORDER BY CREATED_DATE DESC
+        """).to_pandas()
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
+def get_report_data(report_id):
+    """Get the full data for a specific report"""
+    try:
+        result = session.sql(f"""
+            SELECT REPORT_DATA, SUMMARY_DATA, FILTERS_APPLIED
+            FROM CDE_SAVED_REPORTS
+            WHERE REPORT_ID = {report_id}
+        """).collect()
+        
+        if result:
+            report_data = json.loads(result[0]['REPORT_DATA']) if result[0]['REPORT_DATA'] else []
+            summary_data = json.loads(result[0]['SUMMARY_DATA']) if result[0]['SUMMARY_DATA'] else {}
+            filters = json.loads(result[0]['FILTERS_APPLIED']) if result[0]['FILTERS_APPLIED'] else {}
+            return pd.DataFrame(report_data), summary_data, filters
+        return pd.DataFrame(), {}, {}
+    except Exception as e:
+        st.error(f"Error loading report: {str(e)}")
+        return pd.DataFrame(), {}, {}
+
+def delete_report(report_id):
+    """Soft delete a report"""
+    try:
+        session.sql(f"""
+            UPDATE CDE_SAVED_REPORTS
+            SET REPORT_STATUS = 'DELETED'
+            WHERE REPORT_ID = {report_id}
+        """).collect()
+        return True
+    except Exception as e:
+        return False
+
+def export_to_excel(df, sheet_name="CDE Results"):
+    """Export dataframe to Excel format"""
+    from io import BytesIO
+    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+    output.seek(0)
+    return output
+
+def generate_report_summary(df_results):
+    """Generate a summary dictionary from results"""
+    summary = {
+        'total_findings': len(df_results),
+        'pii_count': len(df_results[df_results['MATCHED_IS_PII'] == 'Y']) if 'MATCHED_IS_PII' in df_results.columns else 0,
+        'tables_affected': df_results['TABLE_NAME'].nunique() if 'TABLE_NAME' in df_results.columns else 0,
+        'domains': df_results['MATCHED_DOMAIN'].value_counts().to_dict() if 'MATCHED_DOMAIN' in df_results.columns else {},
+        'match_methods': df_results['MATCH_METHOD'].value_counts().to_dict() if 'MATCH_METHOD' in df_results.columns else {},
+        'avg_match_score': df_results['MATCH_SCORE'].mean() if 'MATCH_SCORE' in df_results.columns else 0,
+        'generated_at': datetime.now().isoformat()
+    }
+    return summary
+
+# Save Report Dialog Component
+def render_save_report_dialog(df_results, scan_run_id=None, database_name=None, 
+                              schema_name=None, filters_applied=None, ai_model_used=None,
+                              key_prefix="save"):
+    """Render a save report dialog/form"""
+    
+    # Ensure the saved reports table exists
+    create_saved_reports_table()
+    
+    st.markdown("---")
+    st.markdown("### 💾 Save Report")
+    
+    with st.expander("📁 Save Results as Named Report", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            report_name = st.text_input(
+                "Report Name *",
+                placeholder="e.g., Q1 2024 PII Audit - Production",
+                key=f"{key_prefix}_report_name"
+            )
+            
+            report_type = st.selectbox(
+                "Report Type",
+                ["Full Scan", "Filtered Results", "PII Analysis", "Domain Analysis", "Custom"],
+                key=f"{key_prefix}_report_type"
+            )
+        
+        with col2:
+            report_description = st.text_area(
+                "Description",
+                placeholder="Brief description of this report...",
+                height=100,
+                key=f"{key_prefix}_report_desc"
+            )
+        
+        # Show what will be saved
+        st.markdown("**📊 Report Preview:**")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Findings", len(df_results))
+        with col2:
+            pii_count = len(df_results[df_results['MATCHED_IS_PII'] == 'Y']) if 'MATCHED_IS_PII' in df_results.columns else 0
+            st.metric("PII Elements", pii_count)
+        with col3:
+            tables = df_results['TABLE_NAME'].nunique() if 'TABLE_NAME' in df_results.columns else 0
+            st.metric("Tables", tables)
+        with col4:
+            if 'MATCH_METHOD' in df_results.columns:
+                ai_count = len(df_results[df_results['MATCH_METHOD'] == 'AI Semantic'])
+                st.metric("AI Matches", ai_count)
+        
+        col1, col2, col3 = st.columns([1, 1, 2])
+        
+        with col1:
+            if st.button("💾 Save Report", type="primary", key=f"{key_prefix}_save_btn"):
+                if not report_name:
+                    st.error("❌ Please enter a report name")
+                elif len(df_results) == 0:
+                    st.error("❌ No data to save")
+                else:
+                    summary_data = generate_report_summary(df_results)
+                    success, message = save_report(
+                        report_name=report_name,
+                        report_description=report_description,
+                        report_type=report_type,
+                        scan_run_id=scan_run_id,
+                        database_name=database_name,
+                        schema_name=schema_name,
+                        df_results=df_results,
+                        filters_applied=filters_applied,
+                        ai_model_used=ai_model_used,
+                        summary_data=summary_data
+                    )
+                    
+                    if success:
+                        st.success(f"✅ {message}")
+                        st.balloons()
+                    else:
+                        st.error(f"❌ {message}")
+        
+        with col2:
+            # Quick save with auto-generated name
+            if st.button("⚡ Quick Save", key=f"{key_prefix}_quick_save_btn"):
+                auto_name = f"Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                if database_name and schema_name:
+                    auto_name = f"{database_name}.{schema_name}_{datetime.now().strftime('%Y%m%d_%H%M')}"
+                
+                summary_data = generate_report_summary(df_results)
+                success, message = save_report(
+                    report_name=auto_name,
+                    report_description="Auto-saved report",
+                    report_type="Full Scan",
+                    scan_run_id=scan_run_id,
+                    database_name=database_name,
+                    schema_name=schema_name,
+                    df_results=df_results,
+                    filters_applied=filters_applied,
+                    ai_model_used=ai_model_used,
+                    summary_data=summary_data
+                )
+                
+                if success:
+                    st.success(f"✅ Quick saved as: {auto_name}")
+                else:
+                    st.error(f"❌ {message}")
+    
+    # Export Options
+    with st.expander("📥 Export Options", expanded=False):
+        st.markdown("**Download results in various formats:**")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            # CSV Export
+            csv_data = df_results.to_csv(index=False)
+            st.download_button(
+                label="📄 Download CSV",
+                data=csv_data,
+                file_name=f"cde_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                key=f"{key_prefix}_csv_download"
+            )
+        
+        with col2:
+            # JSON Export
+            json_data = df_results.to_json(orient='records', indent=2, date_format='iso')
+            st.download_button(
+                label="📋 Download JSON",
+                data=json_data,
+                file_name=f"cde_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                key=f"{key_prefix}_json_download"
+            )
+        
+        with col3:
+            # Excel Export
+            try:
+                excel_data = export_to_excel(df_results)
+                st.download_button(
+                    label="📊 Download Excel",
+                    data=excel_data,
+                    file_name=f"cde_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"{key_prefix}_excel_download"
+                )
+            except Exception as e:
+                st.warning("Excel export requires openpyxl")
+        
+        with col4:
+            # Summary Report (Text)
+            summary = generate_report_summary(df_results)
+            summary_text = f"""
+CDE SCAN SUMMARY REPORT
+=======================
+Generated: {summary['generated_at']}
+Database: {database_name or 'N/A'}
+Schema: {schema_name or 'N/A'}
+
+METRICS:
+- Total Findings: {summary['total_findings']}
+- PII Elements: {summary['pii_count']}
+- Tables Affected: {summary['tables_affected']}
+- Average Match Score: {summary['avg_match_score']:.1f}%
+
+DOMAIN BREAKDOWN:
+{chr(10).join([f"- {k}: {v}" for k, v in summary.get('domains', {}).items()])}
+
+MATCH METHODS:
+{chr(10).join([f"- {k}: {v}" for k, v in summary.get('match_methods', {}).items()])}
+"""
+            st.download_button(
+                label="📝 Download Summary",
+                data=summary_text,
+                file_name=f"cde_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain",
+                key=f"{key_prefix}_summary_download"
+            )
+
+# Helper function to match patterns
+def match_pattern(column_name, pattern_type, pattern_value):
+    """Check if a column name matches a pattern with improved accuracy"""
+    column_upper = column_name.upper()
+    pattern_upper = pattern_value.upper()
+    
+    if pattern_type == 'EXACT':
+        return column_upper == pattern_upper
+    
+    elif pattern_type == 'CONTAINS':
+        # Improved CONTAINS logic to avoid false positives
+        
+        # If pattern is very short (1-2 chars), require exact word match
+        if len(pattern_upper) <= 2:
+            # Use word boundary matching for short patterns
+            words = column_upper.replace('_', ' ').split()
+            return pattern_upper in words
+        
+        # For patterns 3 chars or longer, check if it's a meaningful substring
+        if pattern_upper in column_upper:
+            # Additional validation: avoid matching if pattern is just part of a longer word
+            # Example: Don't match "AGE" in "AGENT_CODE"
+            
+            # Find the position of the match
+            idx = column_upper.find(pattern_upper)
+            
+            # Check if pattern is surrounded by word boundaries (_, space, or string edges)
+            is_word_boundary_before = (idx == 0 or column_upper[idx - 1] in ['_', ' ', '-'])
+            is_word_boundary_after = (idx + len(pattern_upper) >= len(column_upper) or 
+                                     column_upper[idx + len(pattern_upper)] in ['_', ' ', '-'])
+            
+            # Pattern must be at word boundaries OR be 4+ characters long
+            if is_word_boundary_before and is_word_boundary_after:
+                return True
+            elif len(pattern_upper) >= 4:  # Longer patterns can match within words
+                return True
+            else:
+                return False
+        
+        return False
+    
+    elif pattern_type == 'STARTS_WITH':
+        return column_upper.startswith(pattern_upper)
+    
+    elif pattern_type == 'ENDS_WITH':
+        return column_upper.endswith(pattern_upper)
+    
+    elif pattern_type == 'REGEX':
+        try:
+            return bool(re.search(pattern_upper, column_upper))
+        except:
+            return False
+    
+    return False
+
+# ==========================
+# SIDEBAR & NAVIGATION
+# ==========================
+st.sidebar.markdown("# 🤖 CDE Management")
+st.sidebar.markdown("*Powered by Snowflake Cortex AI*")
+st.sidebar.markdown("---")
+
+# Initialize available models with loading indicator
+if 'models_loaded' not in st.session_state:
+    st.session_state.models_loaded = False
+    st.session_state.available_models = []
+
+# Load models section in sidebar
+with st.sidebar:
+    if not st.session_state.models_loaded:
+        with st.spinner("🔍 Detecting available models..."):
+            st.session_state.available_models = get_available_cortex_models()
+            st.session_state.models_loaded = True
+    
+    available_models = st.session_state.available_models
+    
+    if len(available_models) > 0:
+        st.success(f"✅ {len(available_models)} models available")
+        
+        # Show/hide model list
+        with st.expander("📋 View Available Models"):
+            for model in available_models:
+                st.markdown(f"• `{model}`")
+    else:
+        st.error("❌ No Cortex models available")
+        st.info("Check your Snowflake account permissions")
+    
+    # Refresh button
+    if st.button("🔄 Refresh Models", help="Re-check which models are available"):
+        with st.spinner("Checking models..."):
+            st.session_state.available_models = refresh_available_models()
+            st.session_state.models_loaded = True
+            st.rerun()
+
+page = st.sidebar.radio(
+    "Navigate to:",
+    [
+        "📋 Reference Data Management",
+        "🔍 CDE Scan (Intelligent)",
+        "📊 CDE Findings & Analysis",
+        "💾 Saved Reports",
+        "💬 Ask Cortex AI",
+        "⚙️ Model Settings"
+    ],
+    key="navigation"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🎯 AI Features")
+st.sidebar.info("""
+✨ **AI-Powered Features:**
+- 🤖 Pattern Suggestions
+- ✍️ Auto Definitions
+- 🔍 Semantic Matching
+- 🧠 Intelligent Reasoning
+- ✅ Match Validation
+- 💬 Natural Language Q&A
+""")
+
+# Helper function to get model selector with only available models
+def model_selector(key, label="Select AI Model", help_text="Select which Cortex model to use"):
+    """
+    Reusable model selector that only shows available models.
+    Returns the selected model name.
+    """
+    available = st.session_state.available_models
+    
+    if not available:
+        st.warning("⚠️ No AI models available. Please check your Snowflake Cortex configuration.")
+        return None
+    
+    default_model = get_default_model(available)
+    default_index = available.index(default_model) if default_model in available else 0
+    
+    selected = st.selectbox(
+        label,
+        available,
+        index=default_index,
+        help=help_text,
+        key=key,
+        format_func=lambda x: f"{x} - {get_model_info(x)}"
+    )
+    
+    return selected
+
+# ==================== SCREEN 6: MODEL SETTINGS ====================
+if page == "⚙️ Model Settings":
+    st.markdown('<div class="main-header">⚙️ Model Settings</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 CORTEX AI CONFIGURATION</span>', unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Available Models Section
+    st.markdown("### ✅ Available Models")
+    st.markdown("These models have been tested and are available in your Snowflake account:")
+    
+    available_models = st.session_state.available_models
+    
+    if len(available_models) > 0:
+        # Create a nice display of available models
+        cols = st.columns(3)
+        for idx, model in enumerate(available_models):
+            with cols[idx % 3]:
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); 
+                            padding: 0.5rem; border-radius: 0.5rem; margin: 0.25rem 0;">
+                    <strong>✅ {model}</strong><br/>
+                    <small>{get_model_info(model)}</small>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.warning("No models are currently available.")
+    
+    st.markdown("---")
+    
+    # Test Models Section
+    st.markdown("### 🧪 Test Model Availability")
+    st.markdown("Check which models are available in your account:")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        if st.button("🔍 Scan All Models", type="primary", use_container_width=True):
+            st.markdown("#### Scanning Models...")
+            
+            progress_bar = st.progress(0)
+            status_container = st.empty()
+            results_container = st.container()
+            
+            available_count = 0
+            unavailable_count = 0
+            
+            for idx, model in enumerate(ALL_KNOWN_MODELS):
+                progress_bar.progress((idx + 1) / len(ALL_KNOWN_MODELS))
+                status_container.text(f"Testing: {model}...")
+                
+                is_available = test_single_model(model)
+                
+                if is_available:
+                    available_count += 1
+                else:
+                    unavailable_count += 1
+            
+            progress_bar.empty()
+            status_container.empty()
+            
+            # Refresh the cached models
+            st.session_state.available_models = refresh_available_models()
+            
+            st.success(f"✅ Scan complete! Found {available_count} available models, {unavailable_count} unavailable.")
+            st.rerun()
+    
+    with col2:
+        if st.button("🔄 Quick Refresh", use_container_width=True):
+            with st.spinner("Refreshing..."):
+                st.session_state.available_models = refresh_available_models()
+                st.rerun()
+    
+    st.markdown("---")
+    
+    # Unavailable Models Section
+    st.markdown("### ❌ Unavailable Models")
+    st.markdown("These models are known but not available in your account:")
+    
+    unavailable_models = [m for m in ALL_KNOWN_MODELS if m not in available_models]
+    
+    if len(unavailable_models) > 0:
+        with st.expander(f"View {len(unavailable_models)} Unavailable Models"):
+            cols = st.columns(3)
+            for idx, model in enumerate(unavailable_models):
+                with cols[idx % 3]:
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%); 
+                                padding: 0.5rem; border-radius: 0.5rem; margin: 0.25rem 0; opacity: 0.7;">
+                        <strong>❌ {model}</strong><br/>
+                        <small>{get_model_info(model)}</small>
+                    </div>
+                    """, unsafe_allow_html=True)
+    else:
+        st.success("All known models are available!")
+    
+    st.markdown("---")
+    
+    # Test Individual Model
+    st.markdown("### 🔬 Test Individual Model")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        test_model_name = st.text_input("Enter model name to test:", placeholder="e.g., mixtral-8x7b")
+    
+    with col2:
+        st.markdown("<br/>", unsafe_allow_html=True)  # Spacing
+        if st.button("Test Model"):
+            if test_model_name:
+                with st.spinner(f"Testing {test_model_name}..."):
+                    if test_single_model(test_model_name):
+                        st.success(f"✅ Model `{test_model_name}` is available!")
+                    else:
+                        st.error(f"❌ Model `{test_model_name}` is not available.")
+            else:
+                st.warning("Please enter a model name")
+
+# ==================== SCREEN 1: REFERENCE DATA MANAGEMENT ====================
+elif page == "📋 Reference Data Management":
+    st.markdown('<div class="main-header">📋 CDE Reference Data Management</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 AI-ENHANCED</span>', unsafe_allow_html=True)
+    
+    # Create reference table if not exists
+    try:
+        session.sql("""
+            CREATE TABLE IF NOT EXISTS CDE_REFERENCE (
+                CDE_ID NUMBER AUTOINCREMENT,
+                DOMAIN VARCHAR(200),
+                TAG VARCHAR(200),
+                ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
+                IS_PII VARCHAR(1),
+                DEFINITION TEXT,
+                CREATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                CREATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+                UPDATED_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                UPDATED_BY VARCHAR(100) DEFAULT CURRENT_USER(),
+                IS_ACTIVE BOOLEAN DEFAULT TRUE,
+                PRIMARY KEY (CDE_ID)
+            )
+        """).collect()
+    except Exception as e:
+        st.error(f"Error ensuring table exists: {str(e)}")
+    
+    # Tabs for different operations
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 View All", "➕ Add New (AI-Enhanced)", "✏️ Edit", "🗑️ Delete"])
+    
+    # TAB 1: View All
+    with tab1:
+        st.markdown("### Current CDE Reference Data")
+        
+        try:
+            df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+            
+            if len(df_ref) > 0:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total CDEs", len(df_ref))
+                with col2:
+                    st.metric("Unique Domains", df_ref['DOMAIN'].nunique())
+                with col3:
+                    st.metric("PII Elements", len(df_ref[df_ref['IS_PII'] == 'Y']))
+                with col4:
+                    st.metric("Unique Tags", df_ref['TAG'].nunique())
+                
+                st.markdown("---")
+                
+                # Filters
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    filter_domain = st.multiselect(
+                        "Filter by Domain",
+                        options=sorted(df_ref['DOMAIN'].dropna().unique().tolist()),
+                        default=[]
+                    )
+                with col2:
+                    filter_tag = st.multiselect(
+                        "Filter by Tag",
+                        options=sorted(df_ref['TAG'].dropna().unique().tolist()),
+                        default=[]
+                    )
+                with col3:
+                    filter_pii = st.selectbox("Filter by PII", options=["All", "Y", "N"])
+                
+                # Apply filters
+                filtered_df = df_ref.copy()
+                if filter_domain:
+                    filtered_df = filtered_df[filtered_df['DOMAIN'].isin(filter_domain)]
+                if filter_tag:
+                    filtered_df = filtered_df[filtered_df['TAG'].isin(filter_tag)]
+                if filter_pii != "All":
+                    filtered_df = filtered_df[filtered_df['IS_PII'] == filter_pii]
+                
+                st.info(f"Showing {len(filtered_df)} of {len(df_ref)} records")
+                
+                st.dataframe(
+                    filtered_df[['CDE_ID', 'DOMAIN', 'TAG', 'ATTRIBUTE_LOGICAL_NAME', 'IS_PII', 'DEFINITION']],
+                    use_container_width=True,
+                    height=500
+                )
+                
+                csv = filtered_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download as CSV",
+                    data=csv,
+                    file_name=f"cde_reference_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+                
+            else:
+                st.warning("⚠️ No reference data found. Please add CDE definitions.")
+        except Exception as e:
+            st.error(f"Error loading reference data: {str(e)}")
+    
+    # TAB 2: Add New - AI ENHANCED
+    with tab2:
+        st.markdown("### Add New CDE Definition")
+        st.markdown('<span class="ai-badge">🤖 AI-POWERED</span>', unsafe_allow_html=True)
+        
+        # Manual Entry Section
+        st.markdown('<div class="pattern-section">', unsafe_allow_html=True)
+        st.markdown("#### 📝 Manual Entry")
+        
+        with st.form("add_cde_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                add_domain = st.text_input("Domain *", placeholder="e.g., Claims, Coverage/Rider")
+                add_tag = st.text_input("Tag *", placeholder="e.g., Event Details, Financial Metrics")
+                add_attr_name = st.text_input("Attribute Logical Name *", placeholder="e.g., CLAIM_DATE_OF_LOSS")
+            
+            with col2:
+                add_is_pii = st.selectbox("Is PII? *", options=["N", "Y"])
+                add_definition = st.text_area("Definition *", placeholder="Detailed description", height=120)
+            
+            submit_add = st.form_submit_button("➕ Add CDE", type="primary")
+            
+            if submit_add:
+                if not add_domain or not add_tag or not add_attr_name or not add_definition:
+                    st.error("❌ Please fill in all required fields (*)")
+                else:
+                    try:
+                        domain_clean = add_domain.replace("'", "''")
+                        tag_clean = add_tag.replace("'", "''")
+                        attr_clean = add_attr_name.replace("'", "''")
+                        def_clean = add_definition.replace("'", "''")
+                        
+                        insert_query = f"""
+                        INSERT INTO CDE_REFERENCE (DOMAIN, TAG, ATTRIBUTE_LOGICAL_NAME, IS_PII, DEFINITION)
+                        VALUES ('{domain_clean}', '{tag_clean}', '{attr_clean}', '{add_is_pii}', '{def_clean}')
+                        """
+                        session.sql(insert_query).collect()
+                        st.success(f"✅ Successfully added CDE: **{add_attr_name}**")
+                        st.balloons()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Error adding CDE: {str(e)}")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # AI Assistant Section
+        st.markdown('<div class="intelligent-section">', unsafe_allow_html=True)
+        st.markdown("#### 🤖 AI Assistant")
+        st.markdown("*Use Cortex AI to help create your CDE definition*")
+        
+        # Model selector for AI assistant - ONLY AVAILABLE MODELS
+        ai_assistant_model = model_selector(
+            key="ai_assistant_model",
+            label="AI Model for Assistant",
+            help_text="Select which Cortex model to use for AI assistance"
+        )
+        
+        if ai_assistant_model:
+            st.markdown(f'<div class="model-info">📊 Using: {get_model_info(ai_assistant_model)}</div>', unsafe_allow_html=True)
+        
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                ai_attr_name = st.text_input("Attribute Name", key="ai_attr", placeholder="e.g., CUSTOMER_SSN")
+                ai_domain = st.text_input("Domain", key="ai_domain", placeholder="e.g., New Business")
+            
+            with col2:
+                ai_tag = st.text_input("Tag", key="ai_tag", placeholder="e.g., Applicant Info")
+            
+            st.markdown("---")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("🤖 Generate Pattern Suggestions", type="secondary", use_container_width=True):
+                    if ai_attr_name and ai_domain:
+                        with st.spinner("🤖 AI is thinking..."):
+                            patterns = generate_pattern_suggestions(ai_attr_name, ai_domain, ai_assistant_model)
+                            if patterns:
+                                st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                                st.markdown("**💡 AI-Generated Pattern Suggestions:**")
+                                st.code(", ".join(patterns))
+                                st.markdown("*Use these to create pattern rules in CDE_PATTERN_RULES table*")
+                                st.markdown('</div>', unsafe_allow_html=True)
+                            else:
+                                st.warning("Could not generate patterns")
+                    else:
+                        st.warning("Please enter Attribute Name and Domain")
+            
+            with col2:
+                if st.button("✍️ Generate Definition", type="secondary", use_container_width=True):
+                    if ai_attr_name and ai_domain:
+                        with st.spinner("🤖 AI is writing..."):
+                            definition = generate_definition(ai_attr_name, ai_domain, ai_tag or "General", ai_assistant_model)
+                            if definition:
+                                st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                                st.markdown("**📝 AI-Generated Definition:**")
+                                st.info(definition)
+                                st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.warning("Please enter Attribute Name and Domain")
+            
+            with col3:
+                if st.button("🎯 Suggest Classification", type="secondary", use_container_width=True):
+                    if ai_attr_name:
+                        with st.spinner("🤖 AI is analyzing..."):
+                            classification = ai_classify_column(ai_attr_name, "N/A", "VARCHAR", ai_assistant_model)
+                            st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                            st.markdown("**🎯 AI Classification:**")
+                            st.write(f"**Domain:** {classification.get('domain', 'Unknown')}")
+                            st.write(f"**Tag:** {classification.get('tag', 'Unknown')}")
+                            st.write(f"**PII:** {classification.get('is_pii', 'N')}")
+                            st.write(f"**Confidence:** {classification.get('confidence', 0)}%")
+                            st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.warning("Please enter Attribute Name")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # TAB 3 & 4: Edit and Delete (keeping simple - no AI needed here)
+    with tab3:
+        st.markdown("### Edit Existing CDE Definition")
+        
+        try:
+            df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+            
+            if len(df_ref) > 0:
+                cde_options = df_ref.apply(
+                    lambda x: f"{x['CDE_ID']} - {x['DOMAIN']} - {x['ATTRIBUTE_LOGICAL_NAME']}", 
+                    axis=1
+                ).tolist()
+                
+                selected_cde = st.selectbox("Select CDE to Edit", options=cde_options)
+                
+                if selected_cde:
+                    cde_id = int(selected_cde.split(" - ")[0])
+                    current_data = df_ref[df_ref['CDE_ID'] == cde_id].iloc[0]
+                    
+                    with st.form("edit_cde_form"):
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            edit_domain = st.text_input("Domain *", value=current_data['DOMAIN'])
+                            edit_tag = st.text_input("Tag *", value=current_data['TAG'])
+                            edit_attr_name = st.text_input("Attribute Logical Name *", value=current_data['ATTRIBUTE_LOGICAL_NAME'])
+                        
+                        with col2:
+                            edit_is_pii = st.selectbox("Is PII? *", options=["Y", "N"], index=0 if current_data['IS_PII'] == 'Y' else 1)
+                            edit_definition = st.text_area("Definition *", value=current_data['DEFINITION'] if pd.notna(current_data['DEFINITION']) else "", height=120)
+                        
+                        submit_edit = st.form_submit_button("💾 Update", type="primary")
+                        
+                        if submit_edit:
+                            try:
+                                domain_clean = edit_domain.replace("'", "''")
+                                tag_clean = edit_tag.replace("'", "''")
+                                attr_clean = edit_attr_name.replace("'", "''")
+                                def_clean = edit_definition.replace("'", "''")
+                                
+                                update_query = f"""
+                                UPDATE CDE_REFERENCE SET
+                                    DOMAIN = '{domain_clean}',
+                                    TAG = '{tag_clean}',
+                                    ATTRIBUTE_LOGICAL_NAME = '{attr_clean}',
+                                    IS_PII = '{edit_is_pii}',
+                                    DEFINITION = '{def_clean}',
+                                    UPDATED_DATE = CURRENT_TIMESTAMP(),
+                                    UPDATED_BY = CURRENT_USER()
+                                WHERE CDE_ID = {cde_id}
+                                """
+                                session.sql(update_query).collect()
+                                st.success(f"✅ Successfully updated CDE ID {cde_id}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Error updating CDE: {str(e)}")
+            else:
+                st.warning("⚠️ No CDE definitions available to edit.")
+        except Exception as e:
+            st.error(f"❌ Error loading data: {str(e)}")
+    
+    with tab4:
+        st.markdown("### Delete CDE Definition")
+        st.warning("⚠️ This will soft-delete the record (set IS_ACTIVE = FALSE)")
+        
+        try:
+            df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+            
+            if len(df_ref) > 0:
+                cde_options = df_ref.apply(
+                    lambda x: f"{x['CDE_ID']} - {x['DOMAIN']} - {x['ATTRIBUTE_LOGICAL_NAME']}", 
+                    axis=1
+                ).tolist()
+                
+                selected_delete = st.selectbox("Select CDE to Delete", options=cde_options, key="delete_select")
+                
+                if selected_delete:
+                    cde_id = int(selected_delete.split(" - ")[0])
+                    current_data = df_ref[df_ref['CDE_ID'] == cde_id].iloc[0]
+                    
+                    st.markdown("**Record to Delete:**")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**Domain:** {current_data['DOMAIN']}")
+                        st.write(f"**Tag:** {current_data['TAG']}")
+                    with col2:
+                        st.write(f"**Attribute:** {current_data['ATTRIBUTE_LOGICAL_NAME']}")
+                        st.write(f"**Is PII:** {current_data['IS_PII']}")
+                    
+                    if st.button("🗑️ Confirm Delete", type="primary"):
+                        try:
+                            delete_query = f"""
+                            UPDATE CDE_REFERENCE 
+                            SET IS_ACTIVE = FALSE, UPDATED_DATE = CURRENT_TIMESTAMP(), UPDATED_BY = CURRENT_USER()
+                            WHERE CDE_ID = {cde_id}
+                            """
+                            session.sql(delete_query).collect()
+                            st.success(f"✅ CDE ID {cde_id} deleted")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+            else:
+                st.warning("⚠️ No CDE definitions available.")
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+
+# ==================== SCREEN 2: CDE SCAN (INTELLIGENT) ====================
+elif page == "🔍 CDE Scan (Intelligent)":
+    st.markdown('<div class="main-header">🔍 Intelligent CDE Scan</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 AI-POWERED MATCHING</span>', unsafe_allow_html=True)
+    
+    # Create scan results table
+    try:
+        session.sql("""
+            CREATE TABLE IF NOT EXISTS CDE_SCAN_RESULTS (
+                SCAN_ID NUMBER AUTOINCREMENT,
+                SCAN_RUN_ID VARCHAR(100),
+                SCAN_DATE TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+                SCAN_USER VARCHAR(100) DEFAULT CURRENT_USER(),
+                DATABASE_NAME VARCHAR(200),
+                SCHEMA_NAME VARCHAR(200),
+                TABLE_NAME VARCHAR(200),
+                COLUMN_NAME VARCHAR(200),
+                DATA_TYPE VARCHAR(100),
+                MATCHED_CDE_ID NUMBER,
+                MATCHED_DOMAIN VARCHAR(200),
+                MATCHED_TAG VARCHAR(200),
+                MATCHED_ATTRIBUTE_LOGICAL_NAME VARCHAR(500),
+                MATCHED_IS_PII VARCHAR(1),
+                MATCHED_DEFINITION TEXT,
+                PATTERN_ID NUMBER,
+                PATTERN_TYPE VARCHAR(50),
+                PATTERN_VALUE VARCHAR(500),
+                MATCH_SCORE NUMBER(5,2),
+                MATCH_REASON VARCHAR(2000),
+                MATCH_METHOD VARCHAR(50),
+                AI_VALIDATED BOOLEAN,
+                AI_MODEL_USED VARCHAR(100),
+                IS_REVIEWED BOOLEAN DEFAULT FALSE,
+                REVIEW_STATUS VARCHAR(50),
+                REVIEW_NOTES TEXT,
+                REVIEWED_BY VARCHAR(100),
+                REVIEWED_DATE TIMESTAMP_NTZ,
+                PRIMARY KEY (SCAN_ID)
+            )
+        """).collect()
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+    
+    st.markdown("---")
+    
+    # Scan Configuration
+    st.markdown("### ⚙️ Scan Configuration")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        scan_mode = st.selectbox(
+            "Scan Mode",
+            ["Pattern + AI", "Pattern Only", "AI Only"],
+            help="Pattern+AI: Best accuracy (slower) | Pattern Only: Fast | AI Only: Experimental"
+        )
+    
+    with col2:
+        # Model selector - ONLY AVAILABLE MODELS
+        selected_llm = model_selector(
+            key="scan_model",
+            label="LLM Model for AI Matching",
+            help_text="Select Cortex AI model for semantic matching"
+        )
+        
+        if selected_llm:
+            st.markdown(f'<div class="model-info">{get_model_info(selected_llm)}</div>', unsafe_allow_html=True)
+    
+    with col3:
+        ai_confidence = st.slider(
+            "AI Confidence Threshold",
+            min_value=70,
+            max_value=95,
+            value=85,
+            step=5,
+            help="Minimum confidence for AI matches (higher = fewer but more accurate matches)"
+        )
+    
+    # Check if we have models available for AI modes
+    if scan_mode in ["Pattern + AI", "AI Only"] and not selected_llm:
+        st.error("❌ No AI models available. Please use 'Pattern Only' mode or check your Cortex configuration.")
+        st.stop()
+    
+    st.markdown("---")
+    
+    # Database and Schema Selection
+    st.markdown("### 🎯 Select Scan Scope")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        try:
+            databases = session.sql("SHOW DATABASES").collect()
+            db_list = [row['name'] for row in databases]
+            selected_db = st.selectbox("Select Database *", db_list, key="scan_db")
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            selected_db = None
+    
+    with col2:
+        if selected_db:
+            try:
+                schemas = session.sql(f"SHOW SCHEMAS IN DATABASE {selected_db}").collect()
+                schema_list = [row['name'] for row in schemas]
+                selected_schema = st.selectbox("Select Schema *", schema_list, key="scan_schema")
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                selected_schema = None
+        else:
+            selected_schema = None
+    
+    if selected_db and selected_schema:
+        st.success(f"📍 **Scan Scope:** `{selected_db}.{selected_schema}` | **Mode:** {scan_mode} | **Model:** {selected_llm or 'N/A'}")
+        
+        st.markdown("---")
+        
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            start_scan = st.button("🤖 Start Intelligent Scan", type="primary", use_container_width=True)
+        with col2:
+            preview_tables = st.button("👁️ Preview Tables", use_container_width=True)
+        
+        if preview_tables:
+            try:
+                preview_query = f"""
+                SELECT TABLE_NAME, COUNT(*) as COLUMN_COUNT
+                FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = '{selected_schema}'
+                GROUP BY TABLE_NAME
+                ORDER BY TABLE_NAME
+                """
+                df_preview = session.sql(preview_query).to_pandas()
+                
+                if len(df_preview) > 0:
+                    st.info(f"📊 Found **{len(df_preview)}** tables with **{df_preview['COLUMN_COUNT'].sum()}** columns")
+                    st.dataframe(df_preview, use_container_width=True, height=300)
+                else:
+                    st.warning(f"No tables found")
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+        
+        if start_scan:
+            scan_run_id = generate_scan_run_id()
+            
+            with st.spinner(f"🤖 {'Intelligent' if 'AI' in scan_mode else 'Pattern'} scanning in progress{' using ' + selected_llm if selected_llm else ''}..."):
+                try:
+                    # Get columns
+                    columns_query = f"""
+                    SELECT TABLE_CATALOG as DATABASE_NAME, TABLE_SCHEMA as SCHEMA_NAME,
+                           TABLE_NAME, COLUMN_NAME, DATA_TYPE
+                    FROM {selected_db}.INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = '{selected_schema}'
+                    ORDER BY TABLE_NAME, ORDINAL_POSITION
+                    """
+                    
+                    df_columns = session.sql(columns_query).to_pandas()
+                    
+                    if len(df_columns) == 0:
+                        st.warning(f"⚠️ No tables found")
+                    else:
+                        st.info(f"📊 Scanning **{len(df_columns)}** columns across **{df_columns['TABLE_NAME'].nunique()}** tables{' using **' + selected_llm + '**' if selected_llm else ''}")
+                        
+                        df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+                        
+                        if len(df_ref) == 0:
+                            st.error("❌ No CDE reference patterns found")
+                        else:
+                            # Get pattern rules
+                            try:
+                                df_patterns = session.table("CDE_PATTERN_RULES").filter(F.col("IS_ACTIVE") == True).to_pandas()
+                            except:
+                                df_patterns = pd.DataFrame({
+                                    'PATTERN_ID': range(len(df_ref)),
+                                    'CDE_ID': df_ref['CDE_ID'],
+                                    'PATTERN_TYPE': 'EXACT',
+                                    'PATTERN_VALUE': df_ref['ATTRIBUTE_LOGICAL_NAME'],
+                                    'PATTERN_PRIORITY': 10
+                                })
+                            
+                            matches = []
+                            excluded_columns = []
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            # Prepare CDE list for semantic matching
+                            cde_list = df_ref['ATTRIBUTE_LOGICAL_NAME'].tolist()
+                            
+                            total_columns = len(df_columns)
+                            ai_matches_count = 0
+                            pattern_matches_count = 0
+                            excluded_count = 0
+                            
+                            for idx, col_row in df_columns.iterrows():
+                                progress_bar.progress((idx + 1) / total_columns)
+                                status_text.text(f"Scanning {idx + 1}/{total_columns}: {col_row['COLUMN_NAME']}")
+                                
+                                column_name = col_row['COLUMN_NAME']
+                                
+                                # CHECK EXCLUSION LIST FIRST
+                                is_excluded, exclusion_reason = is_excluded_column(column_name)
+                                
+                                if is_excluded:
+                                    excluded_count += 1
+                                    excluded_columns.append({
+                                        'COLUMN_NAME': column_name,
+                                        'TABLE_NAME': col_row['TABLE_NAME'],
+                                        'REASON': exclusion_reason
+                                    })
+                                    continue
+                                
+                                pattern_matched = False
+                                
+                                # PATTERN MATCHING (if enabled)
+                                if scan_mode in ["Pattern + AI", "Pattern Only"]:
+                                    for _, pattern_row in df_patterns.iterrows():
+                                        if match_pattern(column_name, pattern_row['PATTERN_TYPE'], pattern_row['PATTERN_VALUE']):
+                                            cde_data = df_ref[df_ref['CDE_ID'] == pattern_row['CDE_ID']].iloc[0]
+                                            
+                                            match_score = 100.0 if pattern_row['PATTERN_TYPE'] == 'EXACT' else 80.0
+                                            
+                                            # Use AI for reasoning if in AI mode
+                                            if scan_mode == "Pattern + AI" and selected_llm:
+                                                match_reason = generate_intelligent_reasoning(
+                                                    column_name, col_row['TABLE_NAME'], 
+                                                    cde_data['ATTRIBUTE_LOGICAL_NAME'],
+                                                    cde_data['DEFINITION'],
+                                                    col_row['DATA_TYPE'],
+                                                    cde_data['IS_PII'],
+                                                    selected_llm
+                                                )
+                                            else:
+                                                match_reason = f"Pattern match: {pattern_row['PATTERN_TYPE']} - {cde_data['DEFINITION'][:150]}"
+                                            
+                                            matches.append({
+                                                'SCAN_RUN_ID': scan_run_id,
+                                                'DATABASE_NAME': col_row['DATABASE_NAME'],
+                                                'SCHEMA_NAME': col_row['SCHEMA_NAME'],
+                                                'TABLE_NAME': col_row['TABLE_NAME'],
+                                                'COLUMN_NAME': col_row['COLUMN_NAME'],
+                                                'DATA_TYPE': col_row['DATA_TYPE'],
+                                                'MATCHED_CDE_ID': int(cde_data['CDE_ID']),
+                                                'MATCHED_DOMAIN': cde_data['DOMAIN'],
+                                                'MATCHED_TAG': cde_data['TAG'],
+                                                'MATCHED_ATTRIBUTE_LOGICAL_NAME': cde_data['ATTRIBUTE_LOGICAL_NAME'],
+                                                'MATCHED_IS_PII': cde_data['IS_PII'],
+                                                'MATCHED_DEFINITION': cde_data['DEFINITION'],
+                                                'PATTERN_ID': int(pattern_row['PATTERN_ID']) if 'PATTERN_ID' in pattern_row else None,
+                                                'PATTERN_TYPE': pattern_row['PATTERN_TYPE'],
+                                                'PATTERN_VALUE': pattern_row['PATTERN_VALUE'],
+                                                'MATCH_SCORE': match_score,
+                                                'MATCH_REASON': match_reason,
+                                                'MATCH_METHOD': 'Pattern',
+                                                'AI_VALIDATED': scan_mode == "Pattern + AI",
+                                                'AI_MODEL_USED': selected_llm if scan_mode == "Pattern + AI" else None
+                                            })
+                                            pattern_matched = True
+                                            pattern_matches_count += 1
+                                            break
+                                
+                                # AI SEMANTIC MATCHING (if enabled and no pattern match)
+                                if not pattern_matched and scan_mode in ["Pattern + AI", "AI Only"] and selected_llm:
+                                    context = f"Table: {col_row['TABLE_NAME']}, Type: {col_row['DATA_TYPE']}"
+                                    semantic_match_result = semantic_column_match(column_name, cde_list, context, selected_llm)
+                                    
+                                    if semantic_match_result and semantic_match_result in cde_list:
+                                        cde_data = df_ref[df_ref['ATTRIBUTE_LOGICAL_NAME'] == semantic_match_result].iloc[0]
+                                        
+                                        match_reason = generate_intelligent_reasoning(
+                                            column_name, col_row['TABLE_NAME'],
+                                            cde_data['ATTRIBUTE_LOGICAL_NAME'],
+                                            cde_data['DEFINITION'],
+                                            col_row['DATA_TYPE'],
+                                            cde_data['IS_PII'],
+                                            selected_llm
+                                        )
+                                        
+                                        matches.append({
+                                            'SCAN_RUN_ID': scan_run_id,
+                                            'DATABASE_NAME': col_row['DATABASE_NAME'],
+                                            'SCHEMA_NAME': col_row['SCHEMA_NAME'],
+                                            'TABLE_NAME': col_row['TABLE_NAME'],
+                                            'COLUMN_NAME': col_row['COLUMN_NAME'],
+                                            'DATA_TYPE': col_row['DATA_TYPE'],
+                                            'MATCHED_CDE_ID': int(cde_data['CDE_ID']),
+                                            'MATCHED_DOMAIN': cde_data['DOMAIN'],
+                                            'MATCHED_TAG': cde_data['TAG'],
+                                            'MATCHED_ATTRIBUTE_LOGICAL_NAME': cde_data['ATTRIBUTE_LOGICAL_NAME'],
+                                            'MATCHED_IS_PII': cde_data['IS_PII'],
+                                            'MATCHED_DEFINITION': cde_data['DEFINITION'],
+                                            'PATTERN_ID': None,
+                                            'PATTERN_TYPE': 'AI_SEMANTIC',
+                                            'PATTERN_VALUE': semantic_match_result,
+                                            'MATCH_SCORE': 75.0,
+                                            'MATCH_REASON': match_reason,
+                                            'MATCH_METHOD': 'AI Semantic',
+                                            'AI_VALIDATED': True,
+                                            'AI_MODEL_USED': selected_llm
+                                        })
+                                        ai_matches_count += 1
+                            
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            if len(matches) > 0:
+                                # Auto-save
+                                try:
+                                    for match in matches:
+                                        def_clean = match['MATCHED_DEFINITION'].replace("'", "''") if match['MATCHED_DEFINITION'] else ''
+                                        reason_clean = match['MATCH_REASON'].replace("'", "''")
+                                        
+                                        insert_query = f"""
+                                        INSERT INTO CDE_SCAN_RESULTS (
+                                            SCAN_RUN_ID, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, COLUMN_NAME, DATA_TYPE,
+                                            MATCHED_CDE_ID, MATCHED_DOMAIN, MATCHED_TAG, MATCHED_ATTRIBUTE_LOGICAL_NAME,
+                                            MATCHED_IS_PII, MATCHED_DEFINITION, PATTERN_ID, PATTERN_TYPE, PATTERN_VALUE,
+                                            MATCH_SCORE, MATCH_REASON, MATCH_METHOD, AI_VALIDATED, AI_MODEL_USED
+                                        ) VALUES (
+                                            '{match['SCAN_RUN_ID']}', '{match['DATABASE_NAME']}', '{match['SCHEMA_NAME']}',
+                                            '{match['TABLE_NAME']}', '{match['COLUMN_NAME']}', '{match['DATA_TYPE']}',
+                                            {match['MATCHED_CDE_ID']}, '{match['MATCHED_DOMAIN']}', '{match['MATCHED_TAG']}',
+                                            '{match['MATCHED_ATTRIBUTE_LOGICAL_NAME']}', '{match['MATCHED_IS_PII']}', '{def_clean}',
+                                            {match['PATTERN_ID'] if match['PATTERN_ID'] else 'NULL'}, '{match['PATTERN_TYPE']}',
+                                            '{match['PATTERN_VALUE']}', {match['MATCH_SCORE']}, '{reason_clean}',
+                                            '{match['MATCH_METHOD']}', {match['AI_VALIDATED']}, 
+                                            {'NULL' if not match.get('AI_MODEL_USED') else f"'{match['AI_MODEL_USED']}'" }
+                                        )
+                                        """
+                                        session.sql(insert_query).collect()
+                                    
+                                    st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                                    st.markdown(f"### ✅ Scan Complete!")
+                                    st.markdown(f"**Total CDEs Found:** {len(matches)}")
+                                    st.markdown(f"**Pattern Matches:** {pattern_matches_count} | **AI Matches:** {ai_matches_count}")
+                                    st.markdown(f"**Excluded Columns:** {excluded_count} (audit/system columns)")
+                                    if selected_llm:
+                                        st.markdown(f"**AI Model Used:** {selected_llm}")
+                                    st.markdown('</div>', unsafe_allow_html=True)
+                                    
+                                except Exception as save_error:
+                                    st.warning(f"⚠️ Found {len(matches)} but save failed: {str(save_error)}")
+                                
+                                df_matches = pd.DataFrame(matches)
+                                
+                                # Summary metrics
+                                col1, col2, col3, col4, col5 = st.columns(5)
+                                with col1:
+                                    st.metric("CDEs Found", len(df_matches))
+                                with col2:
+                                    st.metric("PII Elements", len(df_matches[df_matches['MATCHED_IS_PII'] == 'Y']))
+                                with col3:
+                                    st.metric("Tables Affected", df_matches['TABLE_NAME'].nunique())
+                                with col4:
+                                    st.metric("AI Matches", ai_matches_count)
+                                with col5:
+                                    st.metric("Excluded", excluded_count, help="Audit/system columns filtered out")
+                                
+                                # Show excluded columns summary
+                                if excluded_count > 0:
+                                    with st.expander(f"🚫 View {excluded_count} Excluded Columns"):
+                                        df_excluded = pd.DataFrame(excluded_columns)
+                                        st.dataframe(df_excluded, use_container_width=True)
+                                        st.caption("These columns were filtered out as audit/system columns. To modify exclusions, update CDE_EXCLUSION_PATTERNS table.")
+                                
+                                st.markdown("---")
+                                st.markdown("### 📋 Scan Results")
+                                
+                                # Display with method badges
+                                for idx, row in df_matches.iterrows():
+                                    method_badge = "🤖 AI" if row['MATCH_METHOD'] == 'AI Semantic' else "📐 Pattern"
+                                    pii_icon = "🔴" if row['MATCHED_IS_PII'] == 'Y' else "🟢"
+                                    
+                                    with st.expander(
+                                        f"{pii_icon} {method_badge} | {row['TABLE_NAME']}.{row['COLUMN_NAME']} → {row['MATCHED_ATTRIBUTE_LOGICAL_NAME']}"
+                                    ):
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.write(f"**Domain:** {row['MATCHED_DOMAIN']}")
+                                            st.write(f"**Tag:** {row['MATCHED_TAG']}")
+                                            st.write(f"**Data Type:** {row['DATA_TYPE']}")
+                                            st.write(f"**Is PII:** {row['MATCHED_IS_PII']}")
+                                        with col2:
+                                            st.write(f"**Match Method:** {row['MATCH_METHOD']}")
+                                            st.write(f"**Pattern Type:** {row['PATTERN_TYPE']}")
+                                            st.write(f"**Match Score:** {row['MATCH_SCORE']:.0f}%")
+                                            st.write(f"**AI Model:** {row.get('AI_MODEL_USED', 'N/A')}")
+                                        
+                                        st.markdown("**🧠 Intelligent Match Reasoning:**")
+                                        st.info(row['MATCH_REASON'])
+                                
+                                st.markdown("---")
+                                csv = df_matches.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 Download Results as CSV",
+                                    data=csv,
+                                    file_name=f"cde_scan_{scan_run_id}.csv",
+                                    mime="text/csv"
+                                )
+                                
+                                # ADD SAVE FUNCTIONALITY
+                                render_save_report_dialog(
+                                    df_results=df_matches,
+                                    scan_run_id=scan_run_id,
+                                    database_name=selected_db,
+                                    schema_name=selected_schema,
+                                    filters_applied={"scan_mode": scan_mode},
+                                    ai_model_used=selected_llm,
+                                    key_prefix="scan"
+                                )
+                            else:
+                                st.warning("⚠️ No CDEs found")
+                
+                except Exception as e:
+                    st.error(f"❌ Error during scan: {str(e)}")
+                    st.exception(e)
+
+# ==================== SCREEN 3: CDE FINDINGS & ANALYSIS ====================
+elif page == "📊 CDE Findings & Analysis":
+    st.markdown('<div class="main-header">📊 CDE Findings & Analysis</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 AI-ENHANCED</span>', unsafe_allow_html=True)
+    
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🔄 Refresh Data", type="secondary"):
+            st.rerun()
+    
+    try:
+        df_results = session.sql("SELECT * FROM CDE_SCAN_RESULTS ORDER BY SCAN_DATE DESC").to_pandas()
+        
+        if len(df_results) == 0:
+            st.info("ℹ️ No scan results found. Please run a CDE scan first.")
+        else:
+            # Summary metrics
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                st.metric("Total CDEs", len(df_results))
+            with col2:
+                st.metric("PII Elements", len(df_results[df_results['MATCHED_IS_PII'] == 'Y']))
+            with col3:
+                st.metric("Tables", df_results['TABLE_NAME'].nunique())
+            with col4:
+                ai_count = len(df_results[df_results['MATCH_METHOD'] == 'AI Semantic']) if 'MATCH_METHOD' in df_results.columns else 0
+                st.metric("AI Matches", ai_count)
+            with col5:
+                avg_score = df_results['MATCH_SCORE'].mean() if 'MATCH_SCORE' in df_results.columns else 0
+                st.metric("Avg Score", f"{avg_score:.0f}%")
+            
+            # Show which AI models were used
+            if 'AI_MODEL_USED' in df_results.columns:
+                models_used = df_results['AI_MODEL_USED'].dropna().unique()
+                if len(models_used) > 0:
+                    st.info(f"🤖 AI Models Used: {', '.join(models_used)}")
+            
+            st.markdown("---")
+            
+            # Filters
+            st.markdown("### 🔍 Filter Results")
+            
+            # First row of filters
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                # Get all domains from reference table for complete list
+                try:
+                    all_domains = session.sql("SELECT DISTINCT DOMAIN FROM CDE_REFERENCE WHERE IS_ACTIVE = TRUE ORDER BY DOMAIN").to_pandas()
+                    domain_options = all_domains['DOMAIN'].tolist() if len(all_domains) > 0 else sorted(df_results['MATCHED_DOMAIN'].dropna().unique())
+                except:
+                    domain_options = sorted(df_results['MATCHED_DOMAIN'].dropna().unique())
+                
+                filter_domain = st.multiselect("Domain", options=domain_options, default=[])
+            
+            with col2:
+                # Get all tags from reference table
+                try:
+                    all_tags = session.sql("SELECT DISTINCT TAG FROM CDE_REFERENCE WHERE IS_ACTIVE = TRUE ORDER BY TAG").to_pandas()
+                    tag_options = all_tags['TAG'].tolist() if len(all_tags) > 0 else sorted(df_results['MATCHED_TAG'].dropna().unique())
+                except:
+                    tag_options = sorted(df_results['MATCHED_TAG'].dropna().unique())
+                
+                filter_tag = st.multiselect("Tag", options=tag_options, default=[])
+            
+            with col3:
+                filter_pii = st.multiselect("PII Status", options=['Y', 'N'], default=[])
+            
+            with col4:
+                if 'MATCH_METHOD' in df_results.columns:
+                    filter_method = st.multiselect("Match Method", options=sorted(df_results['MATCH_METHOD'].unique()), default=[])
+                else:
+                    filter_method = []
+            
+            # Second row of filters
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                filter_database = st.multiselect("Database", options=sorted(df_results['DATABASE_NAME'].unique()), default=[])
+            
+            with col2:
+                filter_schema = st.multiselect("Schema", options=sorted(df_results['SCHEMA_NAME'].unique()), default=[])
+            
+            with col3:
+                filter_table = st.multiselect("Table", options=sorted(df_results['TABLE_NAME'].unique()), default=[])
+            
+            with col4:
+                # Match score filter
+                score_range = st.slider(
+                    "Match Score Range",
+                    min_value=0,
+                    max_value=100,
+                    value=(0, 100),
+                    help="Filter by match score percentage"
+                )
+            
+            # Apply filters
+            filtered_df = df_results.copy()
+            if filter_domain:
+                filtered_df = filtered_df[filtered_df['MATCHED_DOMAIN'].isin(filter_domain)]
+            if filter_tag:
+                filtered_df = filtered_df[filtered_df['MATCHED_TAG'].isin(filter_tag)]
+            if filter_pii:
+                filtered_df = filtered_df[filtered_df['MATCHED_IS_PII'].isin(filter_pii)]
+            if filter_database:
+                filtered_df = filtered_df[filtered_df['DATABASE_NAME'].isin(filter_database)]
+            if filter_schema:
+                filtered_df = filtered_df[filtered_df['SCHEMA_NAME'].isin(filter_schema)]
+            if filter_table:
+                filtered_df = filtered_df[filtered_df['TABLE_NAME'].isin(filter_table)]
+            if filter_method and 'MATCH_METHOD' in filtered_df.columns:
+                filtered_df = filtered_df[filtered_df['MATCH_METHOD'].isin(filter_method)]
+            # Apply score range filter
+            if 'MATCH_SCORE' in filtered_df.columns:
+                filtered_df = filtered_df[
+                    (filtered_df['MATCH_SCORE'] >= score_range[0]) & 
+                    (filtered_df['MATCH_SCORE'] <= score_range[1])
+                ]
+            
+            st.markdown("---")
+            st.info(f"Showing **{len(filtered_df)}** of **{len(df_results)}** scan results")
+            
+            # =========================================================
+            # QUESTIONABLE MATCHES SECTION (FALSE POSITIVE DETECTION)
+            # =========================================================
+            st.markdown("---")
+            st.markdown("### ⚠️ Questionable Matches (Potential False Positives)")
+            
+            # Detect questionable matches based on multiple criteria
+            questionable_df = filtered_df.copy()
+            
+            # Criteria for questionable matches:
+            questionable_conditions = []
+            
+            # 1. Generic single-word patterns
+            if 'PATTERN_VALUE' in questionable_df.columns:
+                generic_words = ['TYPE', 'DATE', 'RATE', 'CODE', 'NAME', 'NUMBER', 'STATUS', 
+                               'VALUE', 'AMOUNT', 'ID', 'PERCENT', 'TOTAL', 'AGE']
+                questionable_conditions.append(
+                    questionable_df['PATTERN_VALUE'].isin(generic_words)
+                )
+            
+            # 2. Low match scores
+            if 'MATCH_SCORE' in questionable_df.columns:
+                questionable_conditions.append(
+                    questionable_df['MATCH_SCORE'] < 70
+                )
+            
+            # 3. AI flagged as questionable
+            if 'MATCH_REASON' in questionable_df.columns:
+                questionable_conditions.append(
+                    questionable_df['MATCH_REASON'].str.contains('⚠️|QUESTIONABLE|FALSE POSITIVE', case=False, na=False)
+                )
+            
+            # 4. Short pattern values (likely false positives)
+            if 'PATTERN_VALUE' in questionable_df.columns:
+                questionable_conditions.append(
+                    (questionable_df['PATTERN_TYPE'] == 'CONTAINS') & 
+                    (questionable_df['PATTERN_VALUE'].str.len() <= 3)
+                )
+            
+            # 5. Domain mismatch indicators (property/actuarial → insurance)
+            questionable_conditions.append(
+                (questionable_df['TABLE_NAME'].str.contains('PROPERTY|ACTUARIAL|HEATING|BUILDING', case=False, na=False)) &
+                (questionable_df['MATCHED_DOMAIN'].isin(['Claims', 'Policy', 'Coverage/Rider']))
+            )
+            
+            # Combine all conditions (OR logic - any condition triggers questionable flag)
+            if questionable_conditions:
+                questionable_mask = questionable_conditions[0]
+                for condition in questionable_conditions[1:]:
+                    questionable_mask = questionable_mask | condition
+                
+                questionable_matches = questionable_df[questionable_mask].copy()
+            else:
+                questionable_matches = pd.DataFrame()
+            
+            # Display questionable matches
+            if len(questionable_matches) > 0:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.warning(f"⚠️ Found **{len(questionable_matches)}** questionable matches that may be false positives")
+                with col2:
+                    if st.button("🗑️ Delete All Questionable", type="secondary"):
+                        try:
+                            # Delete questionable matches from database
+                            scan_ids = questionable_matches['SCAN_ID'].tolist()
+                            scan_ids_str = ','.join([str(x) for x in scan_ids])
+                            
+                            delete_query = f"""
+                            DELETE FROM CDE_SCAN_RESULTS
+                            WHERE SCAN_ID IN ({scan_ids_str})
+                            """
+                            session.sql(delete_query).collect()
+                            st.success(f"✅ Deleted {len(questionable_matches)} questionable matches")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error deleting: {str(e)}")
+                
+                # Show questionable matches in expandable section
+                with st.expander(f"👁️ View {len(questionable_matches)} Questionable Matches", expanded=True):
+                    for idx, row in questionable_matches.head(50).iterrows():
+                        # Determine why it's questionable
+                        reasons = []
+                        if 'PATTERN_VALUE' in row and str(row['PATTERN_VALUE']) in ['TYPE', 'DATE', 'RATE', 'CODE', 'NAME', 'NUMBER', 'STATUS', 'VALUE', 'AMOUNT', 'ID', 'AGE']:
+                            reasons.append(f"Generic pattern: '{row['PATTERN_VALUE']}'")
+                        if 'MATCH_SCORE' in row and row['MATCH_SCORE'] < 70:
+                            reasons.append(f"Low score: {row['MATCH_SCORE']:.0f}%")
+                        if 'MATCH_REASON' in row and ('⚠️' in str(row['MATCH_REASON']) or 'QUESTIONABLE' in str(row['MATCH_REASON']).upper()):
+                            reasons.append("AI flagged")
+                        if 'PATTERN_VALUE' in row and 'PATTERN_TYPE' in row and row['PATTERN_TYPE'] == 'CONTAINS' and len(str(row['PATTERN_VALUE'])) <= 3:
+                            reasons.append(f"Short: '{row['PATTERN_VALUE']}'")
+                        if 'TABLE_NAME' in row and any(word in str(row['TABLE_NAME']).upper() for word in ['PROPERTY', 'ACTUARIAL', 'HEATING', 'BUILDING']):
+                            reasons.append("Domain mismatch")
+                        
+                        reason_text = " | ".join(reasons) if reasons else "Multiple indicators"
+                        
+                        col_a, col_b = st.columns([4, 1])
+                        with col_a:
+                            st.markdown(f"**⚠️ {row['TABLE_NAME']}.{row['COLUMN_NAME']} → {row['MATCHED_ATTRIBUTE_LOGICAL_NAME']}**")
+                            st.caption(f"🔍 {reason_text}")
+                        with col_b:
+                            if st.button("🗑️", key=f"del_{row['SCAN_ID']}", help="Delete this match"):
+                                try:
+                                    session.sql(f"DELETE FROM CDE_SCAN_RESULTS WHERE SCAN_ID = {row['SCAN_ID']}").collect()
+                                    st.success("✅")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ {str(e)[:50]}")
+                    
+                    if len(questionable_matches) > 50:
+                        st.info(f"Showing first 50 of {len(questionable_matches)} questionable matches")
+                
+                # Download questionable matches for review
+                st.download_button(
+                    label="📥 Download Questionable Matches",
+                    data=questionable_matches.to_csv(index=False),
+                    file_name=f"questionable_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.success("✅ No questionable matches detected! All results look good.")
+            
+            # Display results
+            st.markdown("---")
+            st.markdown("### 📋 All Scan Results")
+            
+            if len(filtered_df) > 0:
+                for idx, row in filtered_df.head(50).iterrows():
+                    method_badge = f"🤖 {row.get('MATCH_METHOD', 'Pattern')}" if 'MATCH_METHOD' in row else "📐 Pattern"
+                    pii_icon = "🔴 PII" if row['MATCHED_IS_PII'] == 'Y' else "🟢 Non-PII"
+                    model_used = f" ({row.get('AI_MODEL_USED', 'N/A')})" if 'AI_MODEL_USED' in row and pd.notna(row.get('AI_MODEL_USED')) else ""
+                    
+                    with st.expander(f"{pii_icon} | {method_badge}{model_used} | {row['DATABASE_NAME']}.{row['SCHEMA_NAME']}.{row['TABLE_NAME']}.{row['COLUMN_NAME']}"):
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write(f"**🏢 Domain:** {row['MATCHED_DOMAIN']}")
+                            st.write(f"**🏷️ Tag:** {row['MATCHED_TAG']}")
+                            st.write(f"**📝 Attribute:** {row['MATCHED_ATTRIBUTE_LOGICAL_NAME']}")
+                            st.write(f"**💾 Data Type:** {row['DATA_TYPE']}")
+                        
+                        with col2:
+                            st.write(f"**🎯 Match Method:** {row.get('MATCH_METHOD', 'Pattern')}")
+                            st.write(f"**📊 Match Score:** {row['MATCH_SCORE']:.0f}%")
+                            st.write(f"**🤖 AI Model:** {row.get('AI_MODEL_USED', 'N/A')}")
+                            st.write(f"**📅 Scan Date:** {row['SCAN_DATE']}")
+                        
+                        st.markdown("**🧠 AI-Generated Match Reasoning:**")
+                        st.success(row['MATCH_REASON'])
+                
+                if len(filtered_df) > 50:
+                    st.warning(f"Showing first 50 of {len(filtered_df)} results. Use filters to narrow down.")
+            
+            # Download
+            st.markdown("---")
+            csv = filtered_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Filtered Results",
+                data=csv,
+                file_name=f"cde_findings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+            
+            # ADD SAVE FUNCTIONALITY FOR FINDINGS
+            # Collect applied filters for saving
+            applied_filters = {
+                "domains": filter_domain if filter_domain else [],
+                "tags": filter_tag if filter_tag else [],
+                "pii_status": filter_pii if filter_pii else [],
+                "databases": filter_database if filter_database else [],
+                "schemas": filter_schema if filter_schema else [],
+                "tables": filter_table if filter_table else [],
+                "match_methods": filter_method if filter_method else [],
+                "score_range": list(score_range)
+            }
+            
+            # Get AI model used (if any)
+            models_used_list = filtered_df['AI_MODEL_USED'].dropna().unique().tolist() if 'AI_MODEL_USED' in filtered_df.columns else []
+            ai_model = models_used_list[0] if models_used_list else None
+            
+            render_save_report_dialog(
+                df_results=filtered_df,
+                scan_run_id=filtered_df['SCAN_RUN_ID'].iloc[0] if len(filtered_df) > 0 and 'SCAN_RUN_ID' in filtered_df.columns else None,
+                database_name=filtered_df['DATABASE_NAME'].iloc[0] if len(filtered_df) > 0 else None,
+                schema_name=filtered_df['SCHEMA_NAME'].iloc[0] if len(filtered_df) > 0 else None,
+                filters_applied=applied_filters,
+                ai_model_used=ai_model,
+                key_prefix="findings"
+            )
+            
+            # Analysis
+            st.markdown("---")
+            st.markdown("### 📊 Analysis")
+            
+            tab1, tab2, tab3 = st.tabs(["Domain Breakdown", "Match Methods", "PII Summary"])
+            
+            with tab1:
+                domain_counts = filtered_df.groupby('MATCHED_DOMAIN').size().reset_index(name='Count')
+                domain_counts = domain_counts.sort_values('Count', ascending=False)
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.bar_chart(domain_counts.set_index('MATCHED_DOMAIN'))
+                with col2:
+                    st.dataframe(domain_counts, use_container_width=True)
+            
+            with tab2:
+                if 'MATCH_METHOD' in filtered_df.columns:
+                    method_counts = filtered_df.groupby('MATCH_METHOD').size().reset_index(name='Count')
+                    st.bar_chart(method_counts.set_index('MATCH_METHOD'))
+                else:
+                    st.info("Match method data not available")
+            
+            with tab3:
+                pii_summary = filtered_df.groupby(['MATCHED_DOMAIN', 'MATCHED_IS_PII']).size().reset_index(name='Count')
+                pii_pivot = pii_summary.pivot(index='MATCHED_DOMAIN', columns='MATCHED_IS_PII', values='Count').fillna(0)
+                st.dataframe(pii_pivot, use_container_width=True)
+    
+    except Exception as e:
+        st.error(f"❌ Error loading findings: {str(e)}")
+
+# ==================== SCREEN 4: SAVED REPORTS ====================
+elif page == "💾 Saved Reports":
+    st.markdown('<div class="main-header">💾 Saved Reports</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">📁 REPORT MANAGEMENT</span>', unsafe_allow_html=True)
+    
+    st.markdown("""
+    View, manage, and load previously saved CDE scan reports. 
+    Reports preserve your scan results and analysis for future reference.
+    """)
+    
+    # Ensure table exists
+    create_saved_reports_table()
+    
+    st.markdown("---")
+    
+    # Refresh button
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🔄 Refresh", type="secondary"):
+            st.rerun()
+    
+    # Load saved reports
+    df_reports = get_saved_reports()
+    
+    if len(df_reports) == 0:
+        st.info("📭 No saved reports found. Run a CDE scan and save the results to see them here.")
+        
+        st.markdown("---")
+        st.markdown("### 💡 How to Save Reports")
+        st.markdown("""
+        1. **Run a CDE Scan** - Go to "🔍 CDE Scan (Intelligent)" and scan your database
+        2. **Save After Scan** - After the scan completes, use the "💾 Save Report" section
+        3. **Save from Findings** - Go to "📊 CDE Findings & Analysis" to save filtered results
+        """)
+    else:
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Reports", len(df_reports))
+        with col2:
+            total_findings = df_reports['TOTAL_FINDINGS'].sum()
+            st.metric("Total Findings Saved", f"{total_findings:,}")
+        with col3:
+            total_pii = df_reports['PII_COUNT'].sum()
+            st.metric("Total PII Elements", f"{total_pii:,}")
+        with col4:
+            unique_dbs = df_reports['DATABASE_NAME'].nunique()
+            st.metric("Databases Covered", unique_dbs)
+        
+        st.markdown("---")
+        
+        # Tabs for different views
+        tab1, tab2, tab3 = st.tabs(["📋 All Reports", "🔍 Load Report", "🗑️ Manage Reports"])
+        
+        # TAB 1: View All Reports
+        with tab1:
+            st.markdown("### 📋 All Saved Reports")
+            
+            # Filters
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                filter_report_type = st.multiselect(
+                    "Filter by Type",
+                    options=sorted(df_reports['REPORT_TYPE'].unique()),
+                    default=[]
+                )
+            with col2:
+                filter_report_db = st.multiselect(
+                    "Filter by Database",
+                    options=sorted(df_reports['DATABASE_NAME'].unique()),
+                    default=[]
+                )
+            with col3:
+                sort_by = st.selectbox(
+                    "Sort By",
+                    ["Newest First", "Oldest First", "Most Findings", "Most PII"]
+                )
+            
+            # Apply filters
+            filtered_reports = df_reports.copy()
+            if filter_report_type:
+                filtered_reports = filtered_reports[filtered_reports['REPORT_TYPE'].isin(filter_report_type)]
+            if filter_report_db:
+                filtered_reports = filtered_reports[filtered_reports['DATABASE_NAME'].isin(filter_report_db)]
+            
+            # Apply sorting
+            if sort_by == "Newest First":
+                filtered_reports = filtered_reports.sort_values('CREATED_DATE', ascending=False)
+            elif sort_by == "Oldest First":
+                filtered_reports = filtered_reports.sort_values('CREATED_DATE', ascending=True)
+            elif sort_by == "Most Findings":
+                filtered_reports = filtered_reports.sort_values('TOTAL_FINDINGS', ascending=False)
+            elif sort_by == "Most PII":
+                filtered_reports = filtered_reports.sort_values('PII_COUNT', ascending=False)
+            
+            st.info(f"Showing {len(filtered_reports)} of {len(df_reports)} reports")
+            
+            # Display reports as cards
+            for idx, report in filtered_reports.iterrows():
+                with st.expander(
+                    f"📁 {report['REPORT_NAME']} | {report['REPORT_TYPE']} | {report['TOTAL_FINDINGS']} findings",
+                    expanded=False
+                ):
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.markdown(f"**📅 Created:** {report['CREATED_DATE']}")
+                        st.markdown(f"**👤 Created By:** {report['CREATED_BY']}")
+                        st.markdown(f"**🏷️ Type:** {report['REPORT_TYPE']}")
+                    
+                    with col2:
+                        st.markdown(f"**🗄️ Database:** {report['DATABASE_NAME']}")
+                        st.markdown(f"**📂 Schema:** {report['SCHEMA_NAME']}")
+                        st.markdown(f"**🤖 AI Model:** {report['AI_MODEL_USED']}")
+                    
+                    with col3:
+                        st.metric("Total Findings", report['TOTAL_FINDINGS'])
+                        st.metric("PII Elements", report['PII_COUNT'])
+                    
+                    if report['REPORT_DESCRIPTION']:
+                        st.markdown(f"**📝 Description:** {report['REPORT_DESCRIPTION']}")
+                    
+                    # Action buttons
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        if st.button("📥 Load Report", key=f"load_{report['REPORT_ID']}"):
+                            st.session_state['selected_report_id'] = report['REPORT_ID']
+                            st.session_state['selected_report_name'] = report['REPORT_NAME']
+                            st.info("Go to 'Load Report' tab to view the data")
+        
+        # TAB 2: Load and View Report
+        with tab2:
+            st.markdown("### 🔍 Load and View Report")
+            
+            # Report selector
+            report_options = df_reports.apply(
+                lambda x: f"{x['REPORT_ID']} - {x['REPORT_NAME']} ({x['CREATED_DATE'].strftime('%Y-%m-%d') if pd.notna(x['CREATED_DATE']) else 'N/A'})",
+                axis=1
+            ).tolist()
+            
+            # Check if a report was selected from the cards
+            default_idx = 0
+            if 'selected_report_id' in st.session_state:
+                for i, opt in enumerate(report_options):
+                    if opt.startswith(str(st.session_state['selected_report_id'])):
+                        default_idx = i
+                        break
+            
+            selected_report = st.selectbox(
+                "Select Report to Load",
+                options=report_options,
+                index=default_idx
+            )
+            
+            if selected_report:
+                report_id = int(selected_report.split(" - ")[0])
+                report_info = df_reports[df_reports['REPORT_ID'] == report_id].iloc[0]
+                
+                # Load button
+                if st.button("📂 Load Report Data", type="primary"):
+                    with st.spinner("Loading report data..."):
+                        df_report_data, summary_data, filters = get_report_data(report_id)
+                        
+                        if len(df_report_data) > 0:
+                            st.success(f"✅ Loaded report: {report_info['REPORT_NAME']}")
+                            
+                            # Report metadata
+                            st.markdown("#### 📊 Report Information")
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Total Findings", len(df_report_data))
+                            with col2:
+                                pii = len(df_report_data[df_report_data['MATCHED_IS_PII'] == 'Y']) if 'MATCHED_IS_PII' in df_report_data.columns else 0
+                                st.metric("PII Elements", pii)
+                            with col3:
+                                tables = df_report_data['TABLE_NAME'].nunique() if 'TABLE_NAME' in df_report_data.columns else 0
+                                st.metric("Tables", tables)
+                            with col4:
+                                if 'MATCH_METHOD' in df_report_data.columns:
+                                    ai_count = len(df_report_data[df_report_data['MATCH_METHOD'] == 'AI Semantic'])
+                                    st.metric("AI Matches", ai_count)
+                            
+                            # Filters used (if any)
+                            if filters and any(filters.values()):
+                                with st.expander("🔍 Filters Applied When Saved"):
+                                    st.json(filters)
+                            
+                            st.markdown("---")
+                            st.markdown("#### 📋 Report Data")
+                            
+                            # Display the data
+                            st.dataframe(df_report_data, use_container_width=True, height=400)
+                            
+                            # Export options
+                            st.markdown("---")
+                            col1, col2, col3 = st.columns(3)
+                            
+                            with col1:
+                                csv = df_report_data.to_csv(index=False)
+                                st.download_button(
+                                    label="📄 Download CSV",
+                                    data=csv,
+                                    file_name=f"report_{report_id}_{datetime.now().strftime('%Y%m%d')}.csv",
+                                    mime="text/csv"
+                                )
+                            
+                            with col2:
+                                json_data = df_report_data.to_json(orient='records', indent=2)
+                                st.download_button(
+                                    label="📋 Download JSON",
+                                    data=json_data,
+                                    file_name=f"report_{report_id}_{datetime.now().strftime('%Y%m%d')}.json",
+                                    mime="application/json"
+                                )
+                            
+                            with col3:
+                                try:
+                                    excel_data = export_to_excel(df_report_data, sheet_name=f"Report_{report_id}")
+                                    st.download_button(
+                                        label="📊 Download Excel",
+                                        data=excel_data,
+                                        file_name=f"report_{report_id}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                                except:
+                                    st.info("Excel export requires openpyxl")
+                        else:
+                            st.warning("⚠️ No data found in this report")
+        
+        # TAB 3: Manage Reports
+        with tab3:
+            st.markdown("### 🗑️ Manage Reports")
+            st.warning("⚠️ Deleted reports cannot be recovered!")
+            
+            # Multi-select for deletion
+            reports_to_delete = st.multiselect(
+                "Select Reports to Delete",
+                options=df_reports.apply(
+                    lambda x: f"{x['REPORT_ID']} - {x['REPORT_NAME']}",
+                    axis=1
+                ).tolist()
+            )
+            
+            if reports_to_delete:
+                st.markdown(f"**Selected {len(reports_to_delete)} report(s) for deletion:**")
+                for r in reports_to_delete:
+                    st.markdown(f"- {r}")
+                
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    if st.button("🗑️ Delete Selected", type="primary"):
+                        deleted_count = 0
+                        for r in reports_to_delete:
+                            report_id = int(r.split(" - ")[0])
+                            if delete_report(report_id):
+                                deleted_count += 1
+                        
+                        st.success(f"✅ Deleted {deleted_count} report(s)")
+                        st.rerun()
+            
+            st.markdown("---")
+            
+            # Bulk actions
+            st.markdown("#### 🔧 Bulk Actions")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("📥 Export All Reports Summary"):
+                    summary_df = df_reports[['REPORT_ID', 'REPORT_NAME', 'REPORT_TYPE', 
+                                            'DATABASE_NAME', 'SCHEMA_NAME', 'TOTAL_FINDINGS',
+                                            'PII_COUNT', 'CREATED_DATE', 'CREATED_BY']]
+                    csv = summary_df.to_csv(index=False)
+                    st.download_button(
+                        label="📄 Download Summary CSV",
+                        data=csv,
+                        file_name=f"all_reports_summary_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+            
+            with col2:
+                st.markdown("**Storage Statistics:**")
+                st.write(f"- Total Reports: {len(df_reports)}")
+                st.write(f"- Total Findings Stored: {df_reports['TOTAL_FINDINGS'].sum():,}")
+                st.write(f"- Date Range: {df_reports['CREATED_DATE'].min()} to {df_reports['CREATED_DATE'].max()}")
+
+# ==================== SCREEN 5: ASK CORTEX AI ====================
+elif page == "💬 Ask Cortex AI":
+    st.markdown('<div class="main-header">💬 Ask Cortex AI</div>', unsafe_allow_html=True)
+    st.markdown('<span class="ai-badge">🤖 NATURAL LANGUAGE Q&A</span>', unsafe_allow_html=True)
+    
+    st.markdown("""
+    Ask questions about your CDE scan results in natural language. Cortex AI will analyze your data and provide insights.
+    """)
+    
+    st.markdown("---")
+    
+    # Model selector for Q&A - ONLY AVAILABLE MODELS
+    qa_model = model_selector(
+        key="qa_model",
+        label="Select AI Model for Q&A",
+        help_text="Choose which Cortex model to use for answering questions"
+    )
+    
+    if not qa_model:
+        st.error("❌ No AI models available. Please check your Snowflake Cortex configuration.")
+        st.stop()
+    
+    st.markdown(f'<div class="model-info">{get_model_info(qa_model)}</div>', unsafe_allow_html=True)
+    
+    # Load context
+    try:
+        df_results = session.sql("SELECT * FROM CDE_SCAN_RESULTS ORDER BY SCAN_DATE DESC LIMIT 1000").to_pandas()
+        df_ref = session.table("CDE_REFERENCE").filter(F.col("IS_ACTIVE") == True).to_pandas()
+        
+        context_summary = f"""
+        AVAILABLE DATA:
+        - Total CDE Definitions: {len(df_ref)}
+        - Total Scan Results: {len(df_results)}
+        - Databases Scanned: {df_results['DATABASE_NAME'].nunique() if len(df_results) > 0 else 0}
+        - PII Elements Found: {len(df_results[df_results['MATCHED_IS_PII'] == 'Y']) if len(df_results) > 0 else 0}
+        - Domains: {', '.join(df_ref['DOMAIN'].unique())}
+        """
+        
+        st.info(context_summary)
+        
+        st.markdown("---")
+        st.markdown("### 🤖 Ask Your Question")
+        
+        # Example questions
+        with st.expander("📝 Example Questions"):
+            st.markdown("""
+            - Which tables contain the most PII data?
+            - What are the most common CDEs found in my databases?
+            - How many Social Security Number fields were detected?
+            - Which domains have the highest risk data?
+            - Show me all financial CDEs found in the PROD database
+            - What compliance tags are associated with PII data?
+            """)
+        
+        user_question = st.text_area(
+            "Your Question:",
+            placeholder="e.g., Which tables contain Social Security Numbers?",
+            height=100
+        )
+        
+        if st.button("🤖 Ask Cortex AI", type="primary"):
+            if user_question:
+                with st.spinner(f"🤖 Cortex AI ({qa_model}) is thinking..."):
+                    # Prepare detailed context
+                    if len(df_results) > 0:
+                        sample_results = df_results.head(100)[['DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME', 
+                                                                'COLUMN_NAME', 'MATCHED_DOMAIN', 'MATCHED_TAG',
+                                                                'MATCHED_ATTRIBUTE_LOGICAL_NAME', 'MATCHED_IS_PII']].to_string()
+                    else:
+                        sample_results = "No scan results available yet."
+                    
+                    prompt = f"""You are a data governance analyst with access to CDE scan results.
+                    
+                    CONTEXT:
+                    {context_summary}
+                    
+                    SAMPLE SCAN RESULTS (first 100 records):
+                    {sample_results}
+                    
+                    USER QUESTION: {user_question}
+                    
+                    Provide a helpful, accurate answer based on the data above. If you need to make assumptions, state them clearly.
+                    Be specific with numbers, table names, and column names when possible.
+                    Format your response in a clear, structured way.
+                    """
+                    
+                    try:
+                        answer = call_cortex(prompt, qa_model)
+                        
+                        st.markdown('<div class="success-ai">', unsafe_allow_html=True)
+                        st.markdown(f"### 🤖 Cortex AI Response (using {qa_model}):")
+                        st.markdown(answer)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+            else:
+                st.warning("Please enter a question")
+    
+    except Exception as e:
+        st.error(f"Error loading data: {str(e)}")
+
+# Footer
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📊 Statistics")
+try:
+    ref_count = session.sql("SELECT COUNT(*) as CNT FROM CDE_REFERENCE WHERE IS_ACTIVE = TRUE").collect()[0]['CNT']
+    scan_count = session.sql("SELECT COUNT(*) as CNT FROM CDE_SCAN_RESULTS").collect()[0]['CNT']
+    st.sidebar.metric("CDE Definitions", ref_count)
+    st.sidebar.metric("Scan Results", scan_count)
+    
+    # Add saved reports count
+    try:
+        report_count = session.sql("SELECT COUNT(*) as CNT FROM CDE_SAVED_REPORTS WHERE REPORT_STATUS = 'ACTIVE'").collect()[0]['CNT']
+        st.sidebar.metric("Saved Reports", report_count)
+    except:
+        pass
+except:
+    pass
+
+st.sidebar.markdown("---")
+st.sidebar.caption("🤖 Powered by Snowflake Cortex AI")
+st.sidebar.caption(f"📊 {len(st.session_state.get('available_models', []))} models available")
+st.sidebar.caption("Built with ❤️ for Data Governance")
