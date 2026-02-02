@@ -1,0 +1,1089 @@
+Let me walk you through a detailed example with holidays and configuration files.
+
+Configuration Files
+File 1: file_schedule_config.csv
+This is your master configuration stored in S3:
+Location: s3://dmine-staging/config/schedules/file_schedule_config.csv
+csvsource_id,file_pattern,schedule_type,schedule_config,expected_start_time,expected_end_time,grace_period_min,alert_severity,sns_topic,source_owner_email,holiday_calendar_id,is_active
+TSYS,TSYS_TXN_*.dat,DAILY,,06:00,09:00,30,P1,arn:aws:sns:ca-central-1:xxxx:dmine-critical,tsys-support@bank.com,CA_BANK,TRUE
+MECH,MECH_BANKING_*.csv,DAILY,,07:00,10:00,30,P1,arn:aws:sns:ca-central-1:xxxx:dmine-critical,mech-team@bank.com,CA_BANK,TRUE
+XIM,XIM_FRAUD_*.parquet,WEEKLY,MONDAY;WEDNESDAY;FRIDAY,08:00,11:00,45,P2,arn:aws:sns:ca-central-1:xxxx:dmine-alerts,xim-support@bank.com,CA_BANK,TRUE
+VENDOR_A,VENDOR_RISK_*.json,MONTHLY_WEEKDAY,LAST_TUESDAY,07:00,10:00,30,P2,arn:aws:sns:ca-central-1:xxxx:dmine-alerts,vendor-a@external.com,CA_BANK,TRUE
+VENDOR_B,VENDOR_COMPLIANCE_*.dat,MONTHLY_DAY,15,09:00,14:00,60,P2,arn:aws:sns:ca-central-1:xxxx:dmine-alerts,vendor-b@external.com,CA_BANK,TRUE
+REGULATORY,REG_FINTRAC_*.xml,BUSINESS_DAY,5,08:00,12:00,30,P1,arn:aws:sns:ca-central-1:xxxx:dmine-critical,regulatory@bank.com,CA_BANK,TRUE
+CARDS,CARDS_DAILY_*.csv,DAILY,,06:30,08:30,30,P1,arn:aws:sns:ca-central-1:xxxx:dmine-critical,cards-ops@bank.com,CA_BANK,TRUE
+AML,AML_ALERTS_*.parquet,DAILY,,07:00,09:00,30,P1,arn:aws:sns:ca-central-1:xxxx:dmine-critical,aml-team@bank.com,CA_BANK,TRUE
+Column Descriptions:
+ColumnDescriptionExample Valuessource_idUnique source identifierTSYS, MECH, XIMfile_patternExpected file name patternTSYS_TXN_*.datschedule_typeType of schedule ruleDAILY, WEEKLY, MONTHLY_WEEKDAY, MONTHLY_DAY, BUSINESS_DAYschedule_configParameters for the ruleMONDAY;WEDNESDAY;FRIDAY, LAST_TUESDAY, 15, 5expected_start_timeStart of arrival window06:00expected_end_timeEnd of arrival window09:00grace_period_minBuffer before alerting30alert_severityP1, P2, P3, P4P1sns_topicSNS ARN for alertsarn:aws:sns:...source_owner_emailContact for escalationtsys-support@bank.comholiday_calendar_idWhich holiday calendar to useCA_BANKis_activeEnable/disable monitoringTRUE, FALSE
+
+File 2: holiday_calendar.csv
+Location: s3://dmine-staging/config/holidays/holiday_calendar.csv
+csvcalendar_id,holiday_date,holiday_name,is_bank_holiday,notes
+CA_BANK,2026-01-01,New Year's Day,TRUE,Banks closed
+CA_BANK,2026-02-16,Family Day (Ontario),TRUE,Provincial holiday
+CA_BANK,2026-04-03,Good Friday,TRUE,Banks closed
+CA_BANK,2026-04-06,Easter Monday,FALSE,Optional - some sources may send
+CA_BANK,2026-05-18,Victoria Day,TRUE,Banks closed
+CA_BANK,2026-07-01,Canada Day,TRUE,Banks closed
+CA_BANK,2026-08-03,Civic Holiday,TRUE,Banks closed
+CA_BANK,2026-09-07,Labour Day,TRUE,Banks closed
+CA_BANK,2026-10-12,Thanksgiving,TRUE,Banks closed
+CA_BANK,2026-11-11,Remembrance Day,TRUE,Banks closed
+CA_BANK,2026-12-25,Christmas Day,TRUE,Banks closed
+CA_BANK,2026-12-26,Boxing Day,TRUE,Banks closed
+CA_BANK,2026-12-28,Boxing Day Observed,TRUE,Observed holiday
+```
+
+---
+
+## Example Scenario: February 2026
+
+### February 2026 Calendar
+```
+        February 2026
+  Su   Mo   Tu   We   Th   Fr   Sa
+   1    2    3    4    5    6    7
+   8    9   10   11   12   13   14
+  15  [16]  17   18   19   20   21
+  22   23   24   25   26   27   28
+
+  [16] = Family Day Holiday (Monday)
+```
+
+**Key Dates:**
+- **Feb 16 (Monday)** = Family Day Holiday ❌
+- **Feb 17 (Tuesday)** = First business day after holiday
+- **Feb 24 (Tuesday)** = Last Tuesday of February
+- **Feb 15 (Sunday)** = 15th falls on weekend
+- **Feb 6 (Friday)** = 5th Business Day of February
+
+---
+
+## Day-by-Day Evaluation
+
+### **Evaluating Feb 16, 2026 (Family Day - Holiday)**
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  DATE: Monday, February 16, 2026                                        │
+│  HOLIDAY CHECK: Family Day (Ontario) - CA_BANK calendar                 │
+│  RESULT: BANK HOLIDAY = TRUE                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Evaluation for each source:**
+
+| Source | Schedule Type | Rule Check | Holiday Impact | Expected? |
+|--------|---------------|------------|----------------|-----------|
+| TSYS | DAILY | Is business day? | NO - Holiday | ❌ NOT EXPECTED |
+| MECH | DAILY | Is business day? | NO - Holiday | ❌ NOT EXPECTED |
+| XIM | WEEKLY (Mon/Wed/Fri) | Is Monday? YES, but... | NO - Holiday | ❌ NOT EXPECTED |
+| CARDS | DAILY | Is business day? | NO - Holiday | ❌ NOT EXPECTED |
+| AML | DAILY | Is business day? | NO - Holiday | ❌ NOT EXPECTED |
+| VENDOR_A | LAST_TUESDAY | Is last Tuesday? | NO | ❌ NOT EXPECTED |
+| VENDOR_B | MONTHLY_DAY (15th) | Is 15th? NO (yesterday) | N/A | ❌ NOT EXPECTED |
+| REGULATORY | BUSINESS_DAY (5th) | Is 5th biz day? | NO | ❌ NOT EXPECTED |
+
+**Result:** No files expected on Feb 16 (Holiday) → No sensors created → No alerts
+
+---
+
+### **Evaluating Feb 17, 2026 (Tuesday - Day After Holiday)**
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  DATE: Tuesday, February 17, 2026                                       │
+│  HOLIDAY CHECK: Not a holiday                                           │
+│  RESULT: BUSINESS DAY = TRUE                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Evaluation for each source:**
+
+| Source | Schedule Type | Rule Check | Expected? | Time Window |
+|--------|---------------|------------|-----------|-------------|
+| TSYS | DAILY | Is business day? YES | ✅ EXPECTED | 06:00-09:00 |
+| MECH | DAILY | Is business day? YES | ✅ EXPECTED | 07:00-10:00 |
+| XIM | WEEKLY (Mon/Wed/Fri) | Is Mon/Wed/Fri? NO (Tuesday) | ❌ NOT EXPECTED | - |
+| CARDS | DAILY | Is business day? YES | ✅ EXPECTED | 06:30-08:30 |
+| AML | DAILY | Is business day? YES | ✅ EXPECTED | 07:00-09:00 |
+| VENDOR_A | LAST_TUESDAY | Is last Tuesday of Feb? NO (that's Feb 24) | ❌ NOT EXPECTED | - |
+| VENDOR_B | MONTHLY_DAY (15th) | Is 15th? NO | ❌ NOT EXPECTED | - |
+| REGULATORY | BUSINESS_DAY (5th) | Is 5th biz day of Feb? NO | ❌ NOT EXPECTED | - |
+
+**Result:** 4 files expected (TSYS, MECH, CARDS, AML)
+
+---
+
+### **Evaluating Feb 24, 2026 (Last Tuesday of February)**
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  DATE: Tuesday, February 24, 2026                                       │
+│  HOLIDAY CHECK: Not a holiday                                           │
+│  SPECIAL: Last Tuesday of February                                      │
+│  RESULT: BUSINESS DAY = TRUE                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**How "Last Tuesday" is calculated:**
+```
+February 2026 Tuesdays:
+  - Feb 3  (1st Tuesday)
+  - Feb 10 (2nd Tuesday)
+  - Feb 17 (3rd Tuesday)
+  - Feb 24 (4th Tuesday) ← LAST TUESDAY ✓
+
+Next Tuesday would be Mar 3 (different month)
+Therefore: Feb 24 = Last Tuesday of February
+```
+
+**Evaluation for each source:**
+
+| Source | Schedule Type | Rule Check | Expected? | Time Window |
+|--------|---------------|------------|-----------|-------------|
+| TSYS | DAILY | Is business day? YES | ✅ EXPECTED | 06:00-09:00 |
+| MECH | DAILY | Is business day? YES | ✅ EXPECTED | 07:00-10:00 |
+| XIM | WEEKLY (Mon/Wed/Fri) | Is Mon/Wed/Fri? NO | ❌ NOT EXPECTED | - |
+| CARDS | DAILY | Is business day? YES | ✅ EXPECTED | 06:30-08:30 |
+| AML | DAILY | Is business day? YES | ✅ EXPECTED | 07:00-09:00 |
+| **VENDOR_A** | **LAST_TUESDAY** | **Is last Tue of Feb? YES** | **✅ EXPECTED** | **07:00-10:00** |
+| VENDOR_B | MONTHLY_DAY (15th) | Is 15th? NO | ❌ NOT EXPECTED | - |
+| REGULATORY | BUSINESS_DAY (5th) | Is 5th biz day? NO | ❌ NOT EXPECTED | - |
+
+**Result:** 5 files expected (TSYS, MECH, CARDS, AML, **VENDOR_A**)
+
+---
+
+### **Evaluating Feb 6, 2026 (5th Business Day)**
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  DATE: Friday, February 6, 2026                                         │
+│  HOLIDAY CHECK: Not a holiday                                           │
+│  SPECIAL: 5th Business Day of February                                  │
+│  RESULT: BUSINESS DAY = TRUE                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**How "5th Business Day" is calculated:**
+```
+February 2026 Business Days:
+  - Feb 2 (Mon) = 1st business day
+  - Feb 3 (Tue) = 2nd business day
+  - Feb 4 (Wed) = 3rd business day
+  - Feb 5 (Thu) = 4th business day
+  - Feb 6 (Fri) = 5th business day ✓
+
+(Feb 1 is Sunday, not counted)
+```
+
+**Evaluation:**
+
+| Source | Schedule Type | Rule Check | Expected? | Time Window |
+|--------|---------------|------------|-----------|-------------|
+| TSYS | DAILY | Is business day? YES | ✅ EXPECTED | 06:00-09:00 |
+| MECH | DAILY | Is business day? YES | ✅ EXPECTED | 07:00-10:00 |
+| XIM | WEEKLY (Mon/Wed/Fri) | Is Friday? YES | ✅ EXPECTED | 08:00-11:00 |
+| CARDS | DAILY | Is business day? YES | ✅ EXPECTED | 06:30-08:30 |
+| AML | DAILY | Is business day? YES | ✅ EXPECTED | 07:00-09:00 |
+| VENDOR_A | LAST_TUESDAY | Is last Tue? NO | ❌ NOT EXPECTED | - |
+| VENDOR_B | MONTHLY_DAY (15th) | Is 15th? NO | ❌ NOT EXPECTED | - |
+| **REGULATORY** | **BUSINESS_DAY (5th)** | **Is 5th biz day? YES** | **✅ EXPECTED** | **08:00-12:00** |
+
+**Result:** 6 files expected (TSYS, MECH, XIM, CARDS, AML, **REGULATORY**)
+
+---
+
+## Complex Scenario: Holiday Affects Business Day Calculation
+
+### **March 2026 with Holiday Impact**
+```
+          March 2026
+  Su   Mo   Tu   We   Th   Fr   Sa
+   1    2    3    4    5    6    7
+   8    9   10   11   12   13   14
+  15   16   17   18   19   20   21
+  22   23   24   25   26   27   28
+  29   30   31
+
+  No holidays in early March
+```
+
+**5th Business Day Calculation (Normal):**
+- Mar 2 (Mon) = 1st
+- Mar 3 (Tue) = 2nd
+- Mar 4 (Wed) = 3rd
+- Mar 5 (Thu) = 4th
+- Mar 6 (Fri) = **5th business day** ✓
+
+---
+
+### **April 2026 with Good Friday**
+```
+          April 2026
+  Su   Mo   Tu   We   Th   Fr   Sa
+               1    2   [3]   4
+   5   [6]   7    8    9   10   11
+  12   13   14   15   16   17   18
+  19   20   21   22   23   24   25
+  26   27   28   29   30
+
+  [3] = Good Friday (Holiday)
+  [6] = Easter Monday (Holiday - check config)
+```
+
+**5th Business Day Calculation (With Holidays):**
+```
+Assuming both Good Friday (Apr 3) and Easter Monday (Apr 6) are holidays:
+
+- Apr 1 (Wed) = 1st business day
+- Apr 2 (Thu) = 2nd business day
+- Apr 3 (Fri) = HOLIDAY (Good Friday) ❌ NOT COUNTED
+- Apr 4 (Sat) = Weekend ❌
+- Apr 5 (Sun) = Weekend ❌
+- Apr 6 (Mon) = HOLIDAY (Easter Monday) ❌ NOT COUNTED
+- Apr 7 (Tue) = 3rd business day
+- Apr 8 (Wed) = 4th business day
+- Apr 9 (Thu) = 5th business day ✓
+
+REGULATORY file expected on April 9 (not April 7!)
+```
+
+---
+
+## Full Walkthrough: Feb 24, 2026
+
+Let me show the complete flow for **February 24, 2026** (Last Tuesday):
+
+### **Step 1: DAG Triggered at 6:00 AM**
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  AIRFLOW DAG: dmine_file_monitor                                        │
+│  Scheduled: 2026-02-24 06:00:00 EST                                     │
+│  Status: RUNNING                                                        │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### **Step 2: Load Configuration Task**
+```
+Task: load_configuration
+Status: RUNNING
+
+Reading: s3://dmine-staging/config/schedules/file_schedule_config.csv
+Reading: s3://dmine-staging/config/holidays/holiday_calendar.csv
+
+Loaded:
+  - 8 source configurations
+  - 13 holidays for CA_BANK calendar
+  - Active sources: 8
+
+Status: SUCCESS ✅
+```
+
+### **Step 3: Evaluate Schedule Task**
+```
+Task: evaluate_schedule
+Status: RUNNING
+
+Today's Date: 2026-02-24 (Tuesday)
+Holiday Check: Not a holiday ✓
+Day of Week: Tuesday
+Day of Month: 24
+Business Day #: 17 (of February)
+
+Evaluating TSYS (DAILY):
+  → Is business day? YES
+  → Result: EXPECTED ✅
+
+Evaluating MECH (DAILY):
+  → Is business day? YES
+  → Result: EXPECTED ✅
+
+Evaluating XIM (WEEKLY - Mon/Wed/Fri):
+  → Is today Monday? NO
+  → Is today Wednesday? NO
+  → Is today Friday? NO
+  → Result: NOT EXPECTED ❌
+
+Evaluating CARDS (DAILY):
+  → Is business day? YES
+  → Result: EXPECTED ✅
+
+Evaluating AML (DAILY):
+  → Is business day? YES
+  → Result: EXPECTED ✅
+
+Evaluating VENDOR_A (LAST_TUESDAY):
+  → Finding all Tuesdays in February 2026: [3, 10, 17, 24]
+  → Last Tuesday: 24
+  → Is today the 24th? YES
+  → Result: EXPECTED ✅
+
+Evaluating VENDOR_B (MONTHLY_DAY - 15th):
+  → Is today the 15th? NO
+  → Result: NOT EXPECTED ❌
+
+Evaluating REGULATORY (BUSINESS_DAY - 5th):
+  → 5th business day of Feb was: Feb 6
+  → Is today Feb 6? NO
+  → Result: NOT EXPECTED ❌
+
+═══════════════════════════════════════════════════════════════
+SUMMARY: 5 files expected today
+═══════════════════════════════════════════════════════════════
+
+Writing to: s3://dmine-staging/tracking/expected/date=2026-02-24/expected.parquet
+
+Status: SUCCESS ✅
+```
+
+### **Step 4: Dynamic Sensor Tasks Created**
+```
+Creating S3KeySensor tasks for 5 expected files:
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Task: sensor_TSYS                                                        │
+│ Bucket: dmine-landing                                                    │
+│ Key Pattern: tsys/TSYS_TXN_*.dat                                        │
+│ Timeout: 09:30 (09:00 + 30 min grace)                                   │
+│ Poke Interval: 300 seconds (5 min)                                      │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Task: sensor_MECH                                                        │
+│ Bucket: dmine-landing                                                    │
+│ Key Pattern: mech/MECH_BANKING_*.csv                                    │
+│ Timeout: 10:30 (10:00 + 30 min grace)                                   │
+│ Poke Interval: 300 seconds                                              │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Task: sensor_CARDS                                                       │
+│ Bucket: dmine-landing                                                    │
+│ Key Pattern: cards/CARDS_DAILY_*.csv                                    │
+│ Timeout: 09:00 (08:30 + 30 min grace)                                   │
+│ Poke Interval: 300 seconds                                              │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Task: sensor_AML                                                         │
+│ Bucket: dmine-landing                                                    │
+│ Key Pattern: aml/AML_ALERTS_*.parquet                                   │
+│ Timeout: 09:30 (09:00 + 30 min grace)                                   │
+│ Poke Interval: 300 seconds                                              │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Task: sensor_VENDOR_A                                                    │
+│ Bucket: dmine-landing                                                    │
+│ Key Pattern: vendor_a/VENDOR_RISK_*.json                                │
+│ Timeout: 10:30 (10:00 + 30 min grace)                                   │
+│ Poke Interval: 300 seconds                                              │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### **Step 5: Files Arrive (or Don't)**
+
+**Timeline of Events:**
+```
+06:15 - sensor_CARDS: Checking s3://dmine-landing/cards/CARDS_DAILY_*.csv
+        → No file found, will retry in 5 min
+
+06:20 - sensor_CARDS: Checking again...
+        → No file found
+
+06:22 - FILE ARRIVED: s3://dmine-landing/cards/CARDS_DAILY_20260224_062201.csv
+        
+06:25 - sensor_CARDS: Checking again...
+        → FILE FOUND! ✅
+        → Status: SUCCESS
+        → Arrival: 06:22 (ON-TIME, within 06:30-08:30 window... actually EARLY!)
+
+06:30 - sensor_TSYS: Checking s3://dmine-landing/tsys/TSYS_TXN_*.dat
+        → No file found
+
+06:35 - sensor_TSYS: Checking again...
+        → No file found
+
+06:47 - FILE ARRIVED: s3://dmine-landing/tsys/TSYS_TXN_20260224_064712.dat
+
+06:50 - sensor_TSYS: Checking again...
+        → FILE FOUND! ✅
+        → Status: SUCCESS
+        → Arrival: 06:47 (ON-TIME)
+
+07:15 - sensor_MECH: FILE FOUND!
+        → s3://dmine-landing/mech/MECH_BANKING_20260224_071455.csv
+        → Status: SUCCESS ✅
+
+07:30 - sensor_AML: FILE FOUND!
+        → s3://dmine-landing/aml/AML_ALERTS_20260224_072833.parquet
+        → Status: SUCCESS ✅
+
+... time passes ...
+
+10:00 - sensor_VENDOR_A: Still checking...
+        → No file found
+        → Expected window ended (07:00-10:00)
+        → Grace period started
+
+10:15 - sensor_VENDOR_A: Checking...
+        → No file found
+
+10:30 - sensor_VENDOR_A: TIMEOUT REACHED! ❌
+        → Expected: 07:00-10:00
+        → Grace: 30 minutes
+        → Deadline: 10:30
+        → Status: FAILED (timeout)
+        → Triggering alert task
+```
+
+### **Step 6: Alert Generated for VENDOR_A**
+```
+Task: alert_VENDOR_A
+Status: RUNNING
+
+Preparing SNS notification...
+
+Topic: arn:aws:sns:ca-central-1:xxxx:dmine-alerts
+Severity: P2 - HIGH
+
+Message:
+═══════════════════════════════════════════════════════════════════════════
+🚨 DMINE FILE ARRIVAL ALERT
+═══════════════════════════════════════════════════════════════════════════
+
+Alert Level:      P2 - HIGH
+Source System:    VENDOR_A
+File Pattern:     VENDOR_RISK_*.json
+Schedule Rule:    LAST TUESDAY OF MONTH
+
+Expected Date:    2026-02-24 (Last Tuesday of February)
+Expected Window:  07:00 - 10:00 EST
+Grace Period:     30 minutes
+Deadline:         10:30 EST
+Current Time:     10:30 EST
+Status:           ⚠️ MISSING
+
+Landing Path:     s3://dmine-landing/vendor_a/
+
+Last Successful Arrival:
+  Date:           2026-01-27
+  File:           VENDOR_RISK_20260127_083042.json
+  Time:           08:30:42 EST
+
+Source Owner:     vendor-a@external.com
+Runbook:          https://wiki.bank.com/dmine/vendor-a-missing
+
+Recommended Action:
+  1. Contact VENDOR_A source team
+  2. Check for upstream processing issues
+  3. Verify file generation on source side
+
+This is an automated alert from DMINE File Monitoring System.
+═══════════════════════════════════════════════════════════════════════════
+
+Status: SUCCESS ✅ (SNS published)
+```
+
+### **Step 7: Update Tracking Table**
+```
+Task: update_tracking
+Status: RUNNING
+
+Writing results to: s3://dmine-staging/tracking/arrivals/date=2026-02-24/
+
+Results:
+┌────────────┬─────────────────────────┬──────────┬───────────┬─────────────┐
+│ source_id  │ file_name               │ status   │ arrival   │ mins_late   │
+├────────────┼─────────────────────────┼──────────┼───────────┼─────────────┤
+│ CARDS      │ CARDS_DAILY_20260224... │ ON_TIME  │ 06:22:01  │ 0 (early)   │
+│ TSYS       │ TSYS_TXN_20260224...    │ ON_TIME  │ 06:47:12  │ 0           │
+│ MECH       │ MECH_BANKING_20260224...│ ON_TIME  │ 07:14:55  │ 0           │
+│ AML        │ AML_ALERTS_20260224...  │ ON_TIME  │ 07:28:33  │ 0           │
+│ VENDOR_A   │ (none)                  │ MISSING  │ -         │ -           │
+└────────────┴─────────────────────────┴──────────┴───────────┴─────────────┘
+
+Status: SUCCESS ✅
+```
+
+---
+
+## Airflow UI View
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  DAG: dmine_file_monitor                                                    │
+│  Run ID: scheduled__2026-02-24T06:00:00+00:00                               │
+│  State: SUCCESS (with failures)                                             │
+│  Duration: 4h 35m                                                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  TASK GRAPH:                                                                │
+│                                                                             │
+│  load_config ──► evaluate_schedule ──┬──► sensor_TSYS ────► log_arrival ✅  │
+│       ✅               ✅             │         ✅                           │
+│                                      ├──► sensor_MECH ────► log_arrival ✅  │
+│                                      │         ✅                           │
+│                                      ├──► sensor_CARDS ───► log_arrival ✅  │
+│                                      │         ✅                           │
+│                                      ├──► sensor_AML ─────► log_arrival ✅  │
+│                                      │         ✅                           │
+│                                      └──► sensor_VENDOR_A ─► alert_task 🚨  │
+│                                                 ❌ (timeout)       ✅       │
+│                                                                             │
+│                                      update_tracking ✅                     │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  TASK DURATIONS:                                                            │
+│  ✅ load_config        00:00:08                                             │
+│  ✅ evaluate_schedule  00:00:15                                             │
+│  ✅ sensor_TSYS        00:20:12  (found at 06:47)                           │
+│  ✅ sensor_MECH        01:14:55  (found at 07:15)                           │
+│  ✅ sensor_CARDS       00:22:01  (found at 06:22)                           │
+│  ✅ sensor_AML         01:28:33  (found at 07:28)                           │
+│  ❌ sensor_VENDOR_A    04:30:00  (TIMEOUT at 10:30)                         │
+│  ✅ alert_VENDOR_A     00:00:03                                             │
+│  ✅ update_tracking    00:00:12                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Summary: Configuration + Holiday Logic
+ScenarioHow System Handles ItHoliday (e.g., Family Day)Checks holiday_calendar.csv → Skips all DAILY files → No sensors createdDay after HolidayNormal business day → DAILY files expectedLast Tuesday of MonthCalculates all Tuesdays in month → Finds last one → Creates sensor if match5th Business DayCounts only non-holiday weekdays → Creates sensor on correct day15th falls on WeekendMONTHLY_DAY still expects on 15th (or can configure to shift to next business day)File arrives lateSensor times out → Alert sent → If file arrives later, tracking updated to LATE
+
+Would you like me to create a formal solution document with these configuration examples and flows?how the evaluate files process will work2:20 PMArchitected detailed logic flows for file evaluation processGreat question! Let me break down the Evaluate Expected Files process in detail - this is the core brain of the entire solution.
+
+Evaluate Expected Files Process
+Overview
+This process runs once daily (typically at start of day) and determines which files are expected TODAY based on:
+
+Schedule configuration rules
+Holiday calendar
+Business day calculations
+
+
+Process Flow Diagram
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    EVALUATE EXPECTED FILES PROCESS                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────┐
+                    │  STEP 1: LOAD INPUTS          │
+                    │  • file_schedule_config.csv   │
+                    │  • holiday_calendar.csv       │
+                    │  • Current date               │
+                    └───────────────────────────────┘
+                                    │
+                                    ▼
+                    ┌───────────────────────────────┐
+                    │  STEP 2: CHECK IF TODAY IS    │
+                    │  A HOLIDAY                    │
+                    │  (Lookup in holiday calendar) │
+                    └───────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+            ┌──────────────┐               ┌──────────────┐
+            │  IS HOLIDAY  │               │ NOT HOLIDAY  │
+            │  (Bank Day)  │               │ (Business    │
+            │              │               │    Day)      │
+            └──────────────┘               └──────────────┘
+                    │                               │
+                    ▼                               ▼
+            ┌──────────────┐               ┌──────────────────────┐
+            │ Skip all     │               │ STEP 3: LOOP THROUGH │
+            │ DAILY files  │               │ EACH SOURCE CONFIG   │
+            │ (may still   │               └──────────────────────┘
+            │ check others)│                        │
+            └──────────────┘                        ▼
+                                    ┌───────────────────────────────┐
+                                    │  STEP 4: EVALUATE SCHEDULE    │
+                                    │  RULE FOR EACH SOURCE         │
+                                    │                               │
+                                    │  Based on schedule_type:      │
+                                    │  • DAILY                      │
+                                    │  • WEEKLY                     │
+                                    │  • MONTHLY_DAY                │
+                                    │  • MONTHLY_WEEKDAY            │
+                                    │  • BUSINESS_DAY               │
+                                    │  • QUARTERLY                  │
+                                    └───────────────────────────────┘
+                                                    │
+                                                    ▼
+                                    ┌───────────────────────────────┐
+                                    │  STEP 5: BUILD EXPECTED       │
+                                    │  FILES LIST                   │
+                                    │                               │
+                                    │  For each matched rule:       │
+                                    │  • source_id                  │
+                                    │  • file_pattern               │
+                                    │  • expected_start_time        │
+                                    │  • expected_end_time          │
+                                    │  • deadline (end + grace)     │
+                                    └───────────────────────────────┘
+                                                    │
+                                                    ▼
+                                    ┌───────────────────────────────┐
+                                    │  STEP 6: WRITE TO S3          │
+                                    │  expected_files/date=YYYY-MM-DD│
+                                    └───────────────────────────────┘
+
+Step-by-Step Logic
+STEP 1: Load Inputs
+INPUTS:
+├── file_schedule_config.csv (from S3)
+│     → All source configurations with schedule rules
+│
+├── holiday_calendar.csv (from S3)
+│     → All holidays for the applicable calendar
+│
+└── Current Date
+      → Today's date (e.g., 2026-02-24)
+      → Derived: Day of Week (Tuesday)
+      → Derived: Day of Month (24)
+      → Derived: Month (February)
+      → Derived: Year (2026)
+
+STEP 2: Check Holiday Status
+┌─────────────────────────────────────────────────────────────────┐
+│  HOLIDAY CHECK LOGIC                                            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  INPUT: today_date = 2026-02-16                                │
+│  INPUT: calendar_id = CA_BANK                                   │
+│                                                                 │
+│  LOOKUP: Search holiday_calendar.csv                            │
+│          WHERE calendar_id = 'CA_BANK'                          │
+│          AND holiday_date = '2026-02-16'                        │
+│                                                                 │
+│  FOUND:  holiday_date = 2026-02-16                             │
+│          holiday_name = "Family Day"                            │
+│          is_bank_holiday = TRUE                                 │
+│                                                                 │
+│  RESULT: is_holiday = TRUE                                      │
+│          is_business_day = FALSE                                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+Also determine:
+
+Is today a weekend? (Saturday/Sunday)
+Combined check: is_business_day = NOT(is_weekend) AND NOT(is_holiday)
+
+
+STEP 3: Loop Through Each Source Configuration
+FOR EACH source IN file_schedule_config:
+    
+    IF source.is_active = FALSE:
+        SKIP (source is disabled)
+    
+    IF source.holiday_calendar_id != current_calendar:
+        SKIP (different calendar applies)
+    
+    EVALUATE schedule rule...
+
+STEP 4: Evaluate Schedule Rules
+This is the core logic - different evaluation for each schedule type:
+
+Rule Type: DAILY
+┌─────────────────────────────────────────────────────────────────┐
+│  RULE: DAILY                                                    │
+│  Config: (none needed)                                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  LOGIC:                                                         │
+│                                                                 │
+│  IF is_business_day = TRUE                                      │
+│      THEN file_expected = TRUE                                  │
+│      ELSE file_expected = FALSE                                 │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  EXAMPLE 1: Feb 17, 2026 (Tuesday, not holiday)                │
+│      is_business_day = TRUE                                     │
+│      → EXPECTED ✅                                              │
+│                                                                 │
+│  EXAMPLE 2: Feb 16, 2026 (Monday, Family Day)                  │
+│      is_business_day = FALSE (holiday)                          │
+│      → NOT EXPECTED ❌                                          │
+│                                                                 │
+│  EXAMPLE 3: Feb 14, 2026 (Saturday)                            │
+│      is_business_day = FALSE (weekend)                          │
+│      → NOT EXPECTED ❌                                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Rule Type: WEEKLY
+┌─────────────────────────────────────────────────────────────────┐
+│  RULE: WEEKLY                                                   │
+│  Config: schedule_config = "MONDAY;WEDNESDAY;FRIDAY"            │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  LOGIC:                                                         │
+│                                                                 │
+│  1. Parse config into list: [MONDAY, WEDNESDAY, FRIDAY]         │
+│  2. Get today's day of week                                     │
+│  3. Check if today is in the list                               │
+│  4. Also check if today is a business day                       │
+│                                                                 │
+│  IF today_day_of_week IN config_days                            │
+│     AND is_business_day = TRUE                                  │
+│      THEN file_expected = TRUE                                  │
+│      ELSE file_expected = FALSE                                 │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  EXAMPLE 1: Feb 20, 2026 (Friday, not holiday)                 │
+│      today_day = FRIDAY                                         │
+│      FRIDAY in [MON, WED, FRI]? YES                            │
+│      is_business_day = TRUE                                     │
+│      → EXPECTED ✅                                              │
+│                                                                 │
+│  EXAMPLE 2: Feb 24, 2026 (Tuesday)                             │
+│      today_day = TUESDAY                                        │
+│      TUESDAY in [MON, WED, FRI]? NO                            │
+│      → NOT EXPECTED ❌                                          │
+│                                                                 │
+│  EXAMPLE 3: Apr 3, 2026 (Friday, Good Friday holiday)          │
+│      today_day = FRIDAY                                         │
+│      FRIDAY in [MON, WED, FRI]? YES                            │
+│      is_business_day = FALSE (holiday)                          │
+│      → NOT EXPECTED ❌                                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Rule Type: MONTHLY_DAY
+┌─────────────────────────────────────────────────────────────────┐
+│  RULE: MONTHLY_DAY                                              │
+│  Config: schedule_config = "15"                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  LOGIC:                                                         │
+│                                                                 │
+│  1. Parse config to get target day: 15                          │
+│  2. Get today's day of month                                    │
+│  3. Check if they match                                         │
+│                                                                 │
+│  IF today_day_of_month = config_day                             │
+│      THEN file_expected = TRUE                                  │
+│      ELSE file_expected = FALSE                                 │
+│                                                                 │
+│  NOTE: This rule typically does NOT check for business day      │
+│        (file expected on 15th regardless of weekend/holiday)    │
+│        Can be configured differently if needed.                 │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  EXAMPLE 1: Feb 15, 2026 (Sunday)                              │
+│      today_day_of_month = 15                                    │
+│      config_day = 15                                            │
+│      15 = 15? YES                                               │
+│      → EXPECTED ✅ (even though Sunday)                         │
+│                                                                 │
+│  EXAMPLE 2: Feb 16, 2026 (Monday)                              │
+│      today_day_of_month = 16                                    │
+│      config_day = 15                                            │
+│      16 = 15? NO                                                │
+│      → NOT EXPECTED ❌                                          │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  VARIANT: MONTHLY_DAY_OR_NEXT_BUSINESS                          │
+│                                                                 │
+│  If 15th falls on weekend/holiday, shift to next business day: │
+│                                                                 │
+│  Feb 15 (Sunday) → Feb 16 (Monday)... but Feb 16 is holiday    │
+│                  → Feb 17 (Tuesday) = Expected date             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Rule Type: MONTHLY_WEEKDAY (e.g., Last Tuesday)
+┌─────────────────────────────────────────────────────────────────┐
+│  RULE: MONTHLY_WEEKDAY                                          │
+│  Config: schedule_config = "LAST_TUESDAY"                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  LOGIC:                                                         │
+│                                                                 │
+│  1. Parse config:                                               │
+│     - Occurrence: LAST (could be 1ST, 2ND, 3RD, 4TH, LAST)     │
+│     - Day of week: TUESDAY                                      │
+│                                                                 │
+│  2. Find all Tuesdays in current month                         │
+│                                                                 │
+│  3. Select the correct occurrence:                              │
+│     - 1ST = first Tuesday                                       │
+│     - 2ND = second Tuesday                                      │
+│     - LAST = last Tuesday                                       │
+│                                                                 │
+│  4. Check if today matches that date                            │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  DETAILED CALCULATION FOR FEBRUARY 2026:                        │
+│                                                                 │
+│  Step 2a: Get first day of month                                │
+│           Feb 1, 2026 = Sunday                                  │
+│                                                                 │
+│  Step 2b: Find first Tuesday                                    │
+│           Feb 1 (Sun) + 2 days = Feb 3 (Tue) ✓                 │
+│                                                                 │
+│  Step 2c: List all Tuesdays (add 7 days each time)             │
+│           Feb 3  (1st Tuesday)                                  │
+│           Feb 10 (2nd Tuesday)                                  │
+│           Feb 17 (3rd Tuesday)                                  │
+│           Feb 24 (4th Tuesday)                                  │
+│           Mar 3  (would be 5th, but different month - STOP)    │
+│                                                                 │
+│  Step 3: Select LAST Tuesday                                    │
+│          Last in list = Feb 24                                  │
+│                                                                 │
+│  Step 4: Is today Feb 24?                                       │
+│          If YES → EXPECTED ✅                                   │
+│          If NO  → NOT EXPECTED ❌                               │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  OTHER EXAMPLES:                                                │
+│                                                                 │
+│  Config: "1ST_MONDAY"                                           │
+│  March 2026: Mar 2 = 1st Monday                                │
+│                                                                 │
+│  Config: "3RD_FRIDAY"                                           │
+│  March 2026: Mar 6, 13, 20, 27 = Fridays                       │
+│              Mar 20 = 3rd Friday                                │
+│                                                                 │
+│  Config: "LAST_FRIDAY"                                          │
+│  March 2026: Mar 27 = Last Friday                              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Rule Type: BUSINESS_DAY (e.g., 5th Business Day)
+┌─────────────────────────────────────────────────────────────────┐
+│  RULE: BUSINESS_DAY                                             │
+│  Config: schedule_config = "5"                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  LOGIC:                                                         │
+│                                                                 │
+│  1. Parse config to get target: 5th business day                │
+│                                                                 │
+│  2. Calculate all business days in current month                │
+│     - Start from 1st of month                                   │
+│     - Count only days that are:                                 │
+│       • NOT Saturday                                            │
+│       • NOT Sunday                                              │
+│       • NOT in holiday_calendar                                 │
+│                                                                 │
+│  3. Find the Nth business day                                   │
+│                                                                 │
+│  4. Check if today matches that date                            │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  DETAILED CALCULATION FOR FEBRUARY 2026:                        │
+│                                                                 │
+│  Feb 1  (Sun) - Weekend       → NOT business day               │
+│  Feb 2  (Mon) - No holiday    → Business Day #1                │
+│  Feb 3  (Tue) - No holiday    → Business Day #2                │
+│  Feb 4  (Wed) - No holiday    → Business Day #3                │
+│  Feb 5  (Thu) - No holiday    → Business Day #4                │
+│  Feb 6  (Fri) - No holiday    → Business Day #5 ✓              │
+│  Feb 7  (Sat) - Weekend       → NOT business day               │
+│  Feb 8  (Sun) - Weekend       → NOT business day               │
+│  Feb 9  (Mon) - No holiday    → Business Day #6                │
+│  ...                                                            │
+│                                                                 │
+│  5th Business Day = Feb 6                                       │
+│                                                                 │
+│  Is today Feb 6?                                                │
+│      If YES → EXPECTED ✅                                       │
+│      If NO  → NOT EXPECTED ❌                                   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  EXAMPLE WITH HOLIDAY (April 2026):                             │
+│                                                                 │
+│  Apr 1  (Wed) - No holiday    → Business Day #1                │
+│  Apr 2  (Thu) - No holiday    → Business Day #2                │
+│  Apr 3  (Fri) - GOOD FRIDAY   → NOT business day (HOLIDAY)     │
+│  Apr 4  (Sat) - Weekend       → NOT business day               │
+│  Apr 5  (Sun) - Weekend       → NOT business day               │
+│  Apr 6  (Mon) - EASTER MON    → NOT business day (HOLIDAY)     │
+│  Apr 7  (Tue) - No holiday    → Business Day #3                │
+│  Apr 8  (Wed) - No holiday    → Business Day #4                │
+│  Apr 9  (Thu) - No holiday    → Business Day #5 ✓              │
+│                                                                 │
+│  5th Business Day = Apr 9 (NOT Apr 7!)                         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Rule Type: QUARTERLY (Last Business Day of Quarter)
+┌─────────────────────────────────────────────────────────────────┐
+│  RULE: QUARTERLY                                                │
+│  Config: schedule_config = "LAST_BUSINESS_DAY"                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  LOGIC:                                                         │
+│                                                                 │
+│  1. Determine current quarter:                                  │
+│     Q1 = Jan, Feb, Mar (ends Mar 31)                           │
+│     Q2 = Apr, May, Jun (ends Jun 30)                           │
+│     Q3 = Jul, Aug, Sep (ends Sep 30)                           │
+│     Q4 = Oct, Nov, Dec (ends Dec 31)                           │
+│                                                                 │
+│  2. Find last day of quarter                                    │
+│                                                                 │
+│  3. Work backwards to find last business day:                   │
+│     - If last day is business day → use it                     │
+│     - If weekend/holiday → go back one day, repeat             │
+│                                                                 │
+│  4. Check if today matches                                      │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  EXAMPLE: Q1 2026 (ends March 31)                              │
+│                                                                 │
+│  Mar 31, 2026 = Tuesday                                        │
+│  Is it a holiday? NO                                            │
+│  Is it a weekend? NO                                            │
+│  → Last business day of Q1 = March 31                          │
+│                                                                 │
+│  Is today March 31?                                             │
+│      If YES → EXPECTED ✅                                       │
+│      If NO  → NOT EXPECTED ❌                                   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  EXAMPLE: Q2 2026 (ends June 30)                               │
+│                                                                 │
+│  Jun 30, 2026 = Tuesday                                        │
+│  Is it a holiday? NO                                            │
+│  Is it a weekend? NO                                            │
+│  → Last business day of Q2 = June 30                           │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  EXAMPLE: Q4 2025 (ends December 31)                           │
+│                                                                 │
+│  Dec 31, 2025 = Wednesday                                      │
+│  Is it a holiday? Possibly (New Year's Eve)                    │
+│                                                                 │
+│  If Dec 31 is holiday:                                          │
+│      Dec 30, 2025 = Tuesday → Last business day               │
+│                                                                 │
+│  If Dec 31 is NOT holiday:                                      │
+│      Dec 31 = Last business day                                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+STEP 5: Build Expected Files List
+After evaluating all sources, compile the final list:
+┌─────────────────────────────────────────────────────────────────┐
+│  EXPECTED FILES FOR: 2026-02-24                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Source     Rule              Result        Reason              │
+│  ────────────────────────────────────────────────────────────── │
+│  TSYS       DAILY             ✅ EXPECTED   Business day        │
+│  MECH       DAILY             ✅ EXPECTED   Business day        │
+│  XIM        WEEKLY(M/W/F)     ❌ SKIP       Today is Tuesday    │
+│  CARDS      DAILY             ✅ EXPECTED   Business day        │
+│  AML        DAILY             ✅ EXPECTED   Business day        │
+│  VENDOR_A   LAST_TUESDAY      ✅ EXPECTED   Feb 24 = Last Tue   │
+│  VENDOR_B   MONTHLY_DAY(15)   ❌ SKIP       Today is 24th       │
+│  REGULATORY BUSINESS_DAY(5)   ❌ SKIP       5th biz day was Feb 6│
+│                                                                 │
+│  ════════════════════════════════════════════════════════════   │
+│  TOTAL EXPECTED: 5 files                                        │
+│  ════════════════════════════════════════════════════════════   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+Build output records:
+expected_files = [
+    {
+        source_id: "TSYS",
+        file_pattern: "TSYS_TXN_*.dat",
+        expected_date: "2026-02-24",
+        expected_start_time: "06:00",
+        expected_end_time: "09:00",
+        grace_period_min: 30,
+        deadline: "09:30",
+        alert_severity: "P1",
+        sns_topic: "arn:aws:sns:...:dmine-critical",
+        status: "PENDING",
+        s3_path: "s3://dmine-landing/tsys/"
+    },
+    {
+        source_id: "MECH",
+        file_pattern: "MECH_BANKING_*.csv",
+        expected_date: "2026-02-24",
+        expected_start_time: "07:00",
+        expected_end_time: "10:00",
+        grace_period_min: 30,
+        deadline: "10:30",
+        alert_severity: "P1",
+        sns_topic: "arn:aws:sns:...:dmine-critical",
+        status: "PENDING",
+        s3_path: "s3://dmine-landing/mech/"
+    },
+    ... (CARDS, AML, VENDOR_A)
+]
+
+STEP 6: Write to S3
+OUTPUT FILE: s3://dmine-staging/tracking/expected/date=2026-02-24/expected.parquet
+
+┌────────────┬─────────────────────┬──────────────┬────────┬────────┬──────────┬─────────┐
+│ source_id  │ file_pattern        │ expected_date│ start  │ end    │ deadline │ status  │
+├────────────┼─────────────────────┼──────────────┼────────┼────────┼──────────┼─────────┤
+│ TSYS       │ TSYS_TXN_*.dat      │ 2026-02-24   │ 06:00  │ 09:00  │ 09:30    │ PENDING │
+│ MECH       │ MECH_BANKING_*.csv  │ 2026-02-24   │ 07:00  │ 10:00  │ 10:30    │ PENDING │
+│ CARDS      │ CARDS_DAILY_*.csv   │ 2026-02-24   │ 06:30  │ 08:30  │ 09:00    │ PENDING │
+│ AML        │ AML_ALERTS_*.parquet│ 2026-02-24   │ 07:00  │ 09:00  │ 09:30    │ PENDING │
+│ VENDOR_A   │ VENDOR_RISK_*.json  │ 2026-02-24   │ 07:00  │ 10:00  │ 10:30    │ PENDING │
+└────────────┴─────────────────────┴──────────────┴────────┴────────┴──────────┴─────────┘
+
+Also registered in Glue Catalog for Athena queries.
+
+Summary: Decision Tree
+                            ┌─────────────────┐
+                            │  START: Today   │
+                            │  = 2026-02-24   │
+                            └────────┬────────┘
+                                     │
+                                     ▼
+                            ┌─────────────────┐
+                            │  Is Holiday?    │
+                            └────────┬────────┘
+                                     │
+                    ┌────────────────┴────────────────┐
+                    │ YES                            │ NO
+                    ▼                                ▼
+            ┌───────────────┐               ┌───────────────┐
+            │ Skip DAILY    │               │ Check Each    │
+            │ files         │               │ Source Rule   │
+            └───────────────┘               └───────┬───────┘
+                                                    │
+                    ┌───────────────────────────────┼───────────────────────────────┐
+                    │                               │                               │
+                    ▼                               ▼                               ▼
+            ┌───────────────┐               ┌───────────────┐               ┌───────────────┐
+            │ DAILY         │               │ WEEKLY        │               │ MONTHLY_      │
+            │               │               │               │               │ WEEKDAY       │
+            │ Is biz day?   │               │ Today in      │               │               │
+            │ YES → ✅      │               │ config days?  │               │ Calculate     │
+            │ NO  → ❌      │               │ AND biz day?  │               │ Nth weekday   │
+            │               │               │ YES → ✅      │               │ of month      │
+            │               │               │ NO  → ❌      │               │ Match? → ✅   │
+            └───────────────┘               └───────────────┘               └───────────────┘
+                                                    │
+                    ┌───────────────────────────────┼───────────────────────────────┐
+                    │                               │                               │
+                    ▼                               ▼                               ▼
+            ┌───────────────┐               ┌───────────────┐               ┌───────────────┐
+            │ MONTHLY_DAY   │               │ BUSINESS_DAY  │               │ QUARTERLY     │
+            │               │               │               │               │               │
+            │ Today = Nth   │               │ Count biz     │               │ Find last     │
+            │ of month?     │               │ days in month │               │ biz day of    │
+            │ YES → ✅      │               │ (skip holidays│               │ quarter       │
+            │ NO  → ❌      │               │ & weekends)   │               │ Match? → ✅   │
+            │               │               │ Match? → ✅   │               │               │
+            └───────────────┘               └───────────────┘               └───────────────┘
+                                                    │
+                                                    ▼
+                                            ┌───────────────┐
+                                            │ Compile all   │
+                                            │ EXPECTED ✅   │
+                                            │ sources into  │
+                                            │ output file   │
+                                            └───────────────┘
+
+Where This Runs
+OptionImplementationProsMWAA/AirflowPython task within DAGNative scheduling, integrates with sensorsGlue JobPySpark jobHandles large configs, writes Parquet directlyLambdaPython functionFast for small configs, triggered by EventBridge
+
+Would you like me to create the formal solution document with all these details included?
