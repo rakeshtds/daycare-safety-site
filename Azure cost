@@ -1,0 +1,49 @@
+AZURE COST SUMMARY - HIGH LEVEL
+
+ALL ENVIRONMENTS - SIMPLIFIED VIEW
+
+PRODUCTION ENVIRONMENT
+CategoryAzure Services UsedAnnual CostStorageAzure Data Lake Storage Gen2 (ADLS)$187,078ComputeAzure Functions, Azure DMS$3,709ProcessingMicrosoft Fabric (F64), Purview$112,728DRGeo-Redundant Storage (GRS) + Replication$193,278OtherMonitor, Key Vault, Private Endpoints, Logic Apps, Synapse SQL, Support$108,727PRODUCTION TOTAL$605,520
+
+DEV ENVIRONMENT (20% Data, No DR)
+CategoryAzure Services UsedAnnual CostStorageAzure Data Lake Storage Gen2 (ADLS) - LRS$37,416ComputeAzure Functions, Azure DMS$1,107ProcessingMicrosoft Fabric (F16)$25,182DRNone$0OtherMonitor, Key Vault, Private Endpoints, Logic Apps, Synapse SQL, Contingency$4,905DEV TOTAL$68,610
+
+QA ENVIRONMENT (20% Data, No DR)
+CategoryAzure Services UsedAnnual CostStorageAzure Data Lake Storage Gen2 (ADLS) - LRS$37,416ComputeAzure Functions, Azure DMS$1,324ProcessingMicrosoft Fabric (F16)$25,182DRNone$0OtherMonitor, Key Vault, Private Endpoints, Logic Apps, Synapse SQL, Contingency$6,002QA TOTAL$69,924
+
+COMBINED SUMMARY - ALL ENVIRONMENTS
+CategoryPRODDEVQATOTAL%Storage$187,078$37,416$37,416$261,91035%DR$193,278$0$0$193,27826%Processing$112,728$25,182$25,182$163,09222%Other$108,727$4,905$6,002$119,63416%Compute$3,709$1,107$1,324$6,1401%TOTAL$605,520$68,610$69,924$744,054100%
+
+AZURE SERVICES MAPPING
+CategoryAzure ServicePurposeSTORAGEAzure Data Lake Storage Gen2Data lake (Landing, Staging, Standard, Archive zones)COMPUTEAzure Functions (Timer Trigger)EDF streaming processing (every 5 min)Azure Database Migration ServiceSybase IQ to Azure migrationAzure Blob Storage SFTPBatch file transfers (IDP, Direct feeds)PROCESSINGMicrosoft Fabric (F64/F16)ETL, Spark processing, Data Factory pipelinesMicrosoft PurviewData catalog, governance, lineageAzure Synapse Serverless SQLAd-hoc queries on data lakeAzure Logic AppsWorkflow orchestrationDRGeo-Redundant Storage (GRS)Automatic cross-region replicationAzure Data FactoryDR data sync (if using LRS)OTHERAzure Monitor + Log AnalyticsLogging, metrics, dashboardsAzure Key VaultEncryption keys, secretsAzure Private EndpointsPrivate networkingAzure Support (Standard)Technical support
+
+MONTHLY COST VIEW
+EnvironmentMonthly CostProduction$50,460DEV$5,718QA$5,827TOTAL$62,005/month
+
+AZURE vs AWS - QUICK COMPARISON
+MetricAWSAzureDifferenceYear 1 Total$930,262$744,054Azure 20% cheaperMonthly$77,522$62,005-$15,517/month5-Year Total$8.96M$7.17M-$1.79M savings
+
+KEY AZURE SERVICES & SKUs
+ServiceSKU/TierMonthly CostAnnual CostMicrosoft FabricF64 (Production)$8,394$100,728Microsoft FabricF16 (DEV/QA each)$2,099$25,182ADLS Gen2Hot + Cool + ArchiveVaries by tier$261,910 (all env)Azure FunctionsPremium EP2 (Prod)$253$3,031Azure FunctionsPremium EP1 (DEV/QA)$75-$90$905-$1,082Azure MonitorBasic Logs tier$1,460$17,520Azure SupportStandard$2,600$31,200PurviewStandard$1,000$12,000
+
+DATA VOLUMES REMINDER
+EnvironmentData VolumeDaily IngestionProduction491.5TB1.1TB/dayDEV98.3TB (20%)220GB/dayQA98.3TB (20%)220GB/dayTOTAL688.1TB1.54TB/day
+
+FINAL SUMMARY
+┌─────────────────────────────────────────────────────────────┐
+│                 AZURE ANNUAL COST SUMMARY                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   PRODUCTION:    $605,520/year  ($50,460/month)            │
+│   DEV:           $68,610/year   ($5,718/month)             │
+│   QA:            $69,924/year   ($5,827/month)             │
+│                                                             │
+│   ─────────────────────────────────────────────────────    │
+│   TOTAL:         $744,054/year  ($62,005/month)            │
+│                                                             │
+│   vs AWS:        $930,262/year                              │
+│   SAVINGS:       $186,208/year (20% cheaper)               │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+
+Azure/Microsoft Fabric is 20% cheaper than AWS for this workload!
