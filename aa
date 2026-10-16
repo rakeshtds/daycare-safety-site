@@ -1,0 +1,38 @@
+Cc: EA team; Bindu; Tibi; [others]
+
+Hi Jeff,
+
+Sharing the minutes from today’s session with Enterprise Architecture, along with a request for your approval on an interim solution so we can proceed.
+
+Context
+
+As part of Phase 2, DMine is moving to the cloud. The current on-prem DMine (Sybase IQ) is planned for decommission in approximately 6 months.
+SEC1 and SEC2 currently source data from on-prem DMine and serve several downstream consumers. Both platforms, and the ETL built on top of them, will also need modernisation and will move to the cloud. That roadmap will be defined over the coming weeks and is not immediate.
+This creates a gap: once on-prem DMine is retired, SEC1/SEC2 lose their source before their own migration is complete.
+
+Proposed interim solution
+
+Feed SEC1/SEC2 from the new cloud DMine platform for a defined transition period, in place of the retiring on-prem source.
+This keeps data flowing with no impact to SEC1/SEC2 consumers, and buys time to define and execute the SEC1/SEC2 modernisation strategy.
+This is explicitly a temporary bridge, not a target state. It will be retired once SEC1/SEC2 consumers are served from the cloud.
+
+Discussion with EA
+
+Tibi and I presented the proposal to EA today. We acknowledged that moving data from cloud back to on-prem is considered an architectural anti-pattern.
+EA understood the constraint and the rationale for the interim approach.
+EA’s guidance: with CIO approval, we can engage Cloud Engineering and the other relevant teams to formalise the interim solution, including a TDRC amendment if required.
+
+Decision requested
+
+Jeff: your approval to proceed with the interim cloud-to-on-prem feed from cloud DMine to SEC1/SEC2, as a time-bound exception.
+
+Next steps
+
+EA team: please confirm the governance path, including whether a TDRC amendment is needed and what artefacts you require from us.
+Our team: engage Cloud Engineering on the feed design once approval is in place.
+Our team: define the exit criteria and target timeline for retiring the interim feed as part of the SEC1/SEC2 modernisation plan.
+
+Could you share your decision by [date] so we can stay aligned with the DMine decommission timeline? A high-level architecture view is attached.
+
+Thanks,
+[Your name]
