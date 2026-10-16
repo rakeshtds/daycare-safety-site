@@ -36,3 +36,6 @@ Could you share your decision by [date] so we can stay aligned with the DMine de
 
 Thanks,
 [Your name]
+
+
+SEC1 and SEC2 currently receive their feed from the CAD/MBA platform and serve several downstream consumers. Both platforms, and the ETL built on top of them, will also need modernisation and will move to the cloud. That roadmap will be defined over the coming weeks and is not immediate.
